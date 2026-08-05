@@ -1,0 +1,18 @@
+{
+  "name": "mjy-voice-shop-rs-ui-check",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "audio:check": "node scripts/audio-format-contract-check.mjs",
+    "ui:check": "node scripts/ui-acceptance.mjs",
+    "time:check": "node scripts/admin-time-format-check.mjs",
+    "voice:check": "node scripts/voice-integrity-check.mjs",
+    "sdk:check": "node scripts/sdk-acceptance.mjs",
+    "miniprogram:check": "node scripts/miniprogram-c-debug-check.mjs",
+    "cloud:smoke": "scripts/cloud-smoke.sh"
+  },
+  "devDependencies": {
+    "playwright": "^1.54.0"
+  }
+}

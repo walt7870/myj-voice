@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>授权管理 - 管理后台</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="styles.css?v=20260730-admin-data" />
+  </head>
+  <body class="admin-page">
+    <header class="app-header admin-header"><div class="brand-block"><div class="brand-mark">权</div><div><h1>授权管理</h1><p>管理设备接入授权，不影响未操作的既有设备</p></div></div><div class="header-actions"><a href="./">体验页</a></div></header>
+    <main class="admin-layout">
+      <aside class="admin-menu" aria-label="后台菜单"><div class="menu-title">管理菜单</div><a href="admin.html">概览</a><a href="admin-voice.html">语音配置</a><a href="admin-commerce.html">商品与订单</a><a href="admin-conversations.html">会话记录</a><a class="active" href="admin-integrations.html">接入管理</a></aside>
+      <div class="admin-shell single-column">
+        <section class="admin-panel"><div class="section-head"><h2>新建设备授权</h2><b id="authorizationStatus">加载中</b></div><form id="createAuthorizationForm" class="authorization-form"><label>设备 ID<input id="newDeviceId" required /></label><label>设备名称<input id="newDeviceName" required /></label><button type="submit">生成授权</button></form></section>
+        <section class="admin-panel"><div class="section-head"><h2>现有授权</h2></div><div id="authorizationList" class="authorization-list"></div></section>
+      </div>
+    </main>
+    <div id="secretDialog" class="secret-dialog" hidden><div><h2>请立即保存设备密钥</h2><p>该密钥仅显示一次，关闭后无法再次查看。</p><code id="generatedSecret"></code><button id="copySecret" type="button">复制</button><button id="closeSecret" type="button">我已保存</button></div></div>
+    <script src="admin-auth.js?v=20260730-admin-data"></script>
+    <script src="admin-authorizations.js?v=20260730-admin-data"></script>
+  </body>
+</html>

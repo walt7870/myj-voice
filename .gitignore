@@ -1,0 +1,51 @@
+# macOS / Windows
+.DS_Store
+Thumbs.db
+
+# Rust and local build output
+target/
+**/target/
+**/.superpowers/
+
+# JavaScript dependencies and generated reports
+node_modules/
+**/node_modules/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+**/*.py[cod]
+ui-report/
+**/ui-report/
+
+# Local runtime configuration and credentials
+.env
+.env.*
+!.env.example
+**/context.json
+**/context.local.json
+**/*credentials*.json
+**/*secrets*.json
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*_local.h
+**/*.local.h
+
+# Local database, logs, process state, and archives
+*.db
+*.db*
+*.sqlite
+*.sqlite*
+logs/
+**/logs/
+.run/
+**/.run/
+*.zip
+*.tar
+*.tar.gz
+*.tmp
+*.bak
+
+# Locally built device SDK binary
+**/SDKs/cpp/device_client

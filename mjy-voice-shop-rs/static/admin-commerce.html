@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>商品与订单 - 管理后台</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="styles.css?v=20260730-admin-data" />
+  </head>
+  <body class="admin-page">
+    <header class="app-header admin-header">
+      <div class="brand-block">
+        <div class="brand-mark">单</div>
+        <div>
+          <h1>商品与订单</h1>
+          <p>统一管理商品识别、语音订单和订单服务接入</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <a href="./">体验页</a>
+      </div>
+    </header>
+
+    <main class="admin-layout">
+      <aside class="admin-menu" aria-label="后台菜单">
+        <div class="menu-title">管理菜单</div>
+        <a href="admin.html">概览</a>
+        <a href="admin-voice.html">语音配置</a>
+        <a class="active" href="admin-commerce.html">商品与订单</a>
+        <a href="admin-conversations.html">会话记录</a>
+        <a href="admin-integrations.html">接入管理</a>
+      </aside>
+
+      <div class="admin-shell single-column commerce-shell">
+        <nav class="admin-tabs" data-admin-tabs role="tablist" aria-label="商品与订单分类">
+          <button class="admin-tab" id="tab-products" type="button" data-admin-tab="products" aria-controls="panel-products" role="tab">商品库</button>
+          <button class="admin-tab" id="tab-orders" type="button" data-admin-tab="orders" aria-controls="panel-orders" role="tab">订单列表</button>
+          <button class="admin-tab" id="tab-order-mcp" type="button" data-admin-tab="order-mcp" aria-controls="panel-order-mcp" role="tab">订单接入</button>
+        </nav>
+
+        <div class="admin-tab-panel" id="panel-products" data-admin-panel="products" role="tabpanel" aria-labelledby="tab-products">
+          <section class="admin-panel page-hero">
+            <div>
+              <h2>商品管理</h2>
+              <p>别名支持用斜杠、逗号或中文逗号分隔，例如：可乐 / 可口 / 汽水。</p>
+            </div>
+            <button id="adminAddProduct" type="button">新增商品</button>
+          </section>
+
+          <section class="admin-panel">
+            <div class="section-head">
+              <h2>商品列表</h2>
+              <div class="section-meta">
+                <span>体验页会用这里的商品库做确定性匹配</span>
+                <b id="adminStatus">商品库加载中</b>
+              </div>
+            </div>
+            <div id="adminProducts" class="admin-products"></div>
+          </section>
+        </div>
+
+        <div class="admin-tab-panel" id="panel-orders" data-admin-panel="orders" role="tabpanel" aria-labelledby="tab-orders" hidden>
+          <section class="admin-panel page-hero">
+            <div>
+              <h2>语音下单记录</h2>
+              <p>用户通过语音确认后，服务端调用封装的下单服务并在这里沉淀订单。</p>
+            </div>
+            <div class="page-hero-actions">
+              <span id="orderAdminStatus" class="status-pill">加载中</span>
+              <button id="adminRefreshOrders" type="button">刷新订单</button>
+            </div>
+          </section>
+
+          <section class="admin-panel order-admin-panel">
+            <div class="section-head">
+              <h2>最近订单</h2>
+              <div class="section-meta">
+                <span id="orderCount">分页由订单服务返回</span>
+              </div>
+            </div>
+            <div class="order-admin-grid">
+              <div id="orderList" class="order-list"></div>
+              <div id="orderDetail" class="order-detail empty">
+                <h3>选择订单</h3>
+                <p>右侧会展示订单详情、商品明细和接口返回原文。</p>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div class="admin-tab-panel order-mcp-shell" id="panel-order-mcp" data-admin-panel="order-mcp" role="tabpanel" aria-labelledby="tab-order-mcp" hidden>
+          <section class="admin-panel order-mcp-hero">
+            <div>
+              <span class="hero-kicker">Order Gateway</span>
+              <h2>订单链路接入</h2>
+              <p>默认保持本地验证，客户侧 MCP Server 就绪后再打开开关切到真实能力。</p>
+            </div>
+            <div id="orderMcpModeBadge" class="mode-badge">本地验证</div>
+          </section>
+
+          <section class="admin-panel order-mcp-primary">
+            <div class="section-head">
+              <h2>接入控制</h2>
+              <span id="orderMcpStatusText">当前使用本地订单链路</span>
+            </div>
+            <label class="switch-row gateway-switch">
+              <span>
+                <strong>启用 MCP 接入</strong>
+                <small>关闭时保留完整语音购物流程，订单请求使用本地验证数据。</small>
+              </span>
+              <input id="adminOrderMcpEnabled" type="checkbox" />
+            </label>
+            <div class="form-grid">
+              <label class="wide-field">
+                <span>MCP Server URL</span>
+                <input id="adminOrderMcpUrl" type="text" autocomplete="off" placeholder="https://example.com/mcp" />
+              </label>
+              <label class="wide-field">
+                <span>访问 Token</span>
+                <input id="adminOrderMcpToken" type="password" autocomplete="new-password" placeholder="留空则不修改" />
+              </label>
+            </div>
+          </section>
+
+          <section class="admin-panel order-mcp-side">
+            <div class="section-head compact-head">
+              <h2>当前策略</h2>
+            </div>
+            <div class="gateway-status-list">
+              <div><span>01</span><strong>本地验证兜底</strong><small>未启用或调用失败时，不阻塞体验流程。</small></div>
+              <div><span>02</span><strong>客户确认命名</strong><small>能力名以最终客户 MCP 工具列表为准。</small></div>
+              <div><span>03</span><strong>统一上下文</strong><small>设备、门店、会员信息从下方 JSON 注入。</small></div>
+            </div>
+          </section>
+
+          <section class="admin-panel order-mcp-difference">
+            <div class="section-head">
+              <h2>开启与关闭的实际差异</h2>
+              <a href="admin-conversations.html">到会话记录查看每轮真实轨迹</a>
+            </div>
+            <div class="order-route-compare">
+              <article class="local">
+                <header><span>关闭 MCP</span><strong>本地 Mock</strong></header>
+                <ol>
+                  <li>MCP Server 不发起任何网络请求</li>
+                  <li>订单创建、列表、详情和退单读取本地数据</li>
+                  <li>订单来源标记为“本地 Mock”</li>
+                </ol>
+              </article>
+              <article class="mcp">
+                <header><span>开启 MCP</span><strong>客户工具链</strong></header>
+                <ol>
+                  <li>依次调用 authorizeMember、previewOrder、createOrder</li>
+                  <li>请求携带用户 Header，并使用下方能力映射</li>
+                  <li>技术故障时记录原因并自动转本地兜底</li>
+                </ol>
+              </article>
+            </div>
+            <div class="mcp-contract-note">
+              <strong>本地契约基准</strong>
+              <span>客户 PDF 8 个主工具 · camelCase · Header 身份 · 先授权再调用 · SKU 全链路</span>
+              <small>手机号 RSA、真实网关鉴权和 SSE 响应流需在客户正式环境验证；本地 Mock 强制校验 Header，但响应仍使用便于联调的 JSON-RPC JSON。</small>
+            </div>
+          </section>
+
+          <section class="admin-panel order-mcp-context">
+            <div class="section-head">
+              <h2>门店绑定上下文</h2>
+              <span>作为订单工具调用的 context 默认值</span>
+            </div>
+            <textarea id="adminOrderContext" rows="12" spellcheck="false"></textarea>
+          </section>
+
+          <section class="admin-panel order-mcp-map">
+            <div class="section-head">
+              <h2>能力映射</h2>
+              <span>右侧填写客户 MCP Server 实际工具名</span>
+            </div>
+            <div id="adminOrderMcpToolRows" class="mapping-table"></div>
+            <textarea id="adminOrderMcpTools" class="hidden-config-field" rows="1" spellcheck="false"></textarea>
+            <p class="mapping-note">左侧是本服务内部订单能力，右侧输入框填客户最终提供的 MCP 工具名；客户未确认前可保留占位值。</p>
+          </section>
+
+          <div class="admin-actions">
+            <span id="adminOrderMcpSaveStatus">配置加载中</span>
+            <button id="adminSaveBottom" class="publish-btn">保存配置</button>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <script src="admin-time.js?v=20260730-admin-data"></script>
+    <script src="admin-auth.js?v=20260730-admin-data"></script>
+    <script src="admin.js?v=20260730-admin-data"></script>
+  </body>
+</html>

@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>语音配置 - 管理后台</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="styles.css?v=20260730-admin-data" />
+  </head>
+  <body class="admin-page">
+    <header class="app-header admin-header">
+      <div class="brand-block">
+        <div class="brand-mark">声</div>
+        <div>
+          <h1>语音配置</h1>
+          <p>统一管理能力授权、播报模型和对话策略</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <a href="./">体验页</a>
+        <button id="adminSaveTop">保存配置</button>
+      </div>
+    </header>
+
+    <main class="admin-layout">
+      <aside class="admin-menu" aria-label="后台菜单">
+        <div class="menu-title">管理菜单</div>
+        <a href="admin.html">概览</a>
+        <a class="active" href="admin-voice.html">语音配置</a>
+        <a href="admin-commerce.html">商品与订单</a>
+        <a href="admin-conversations.html">会话记录</a>
+        <a href="admin-integrations.html">接入管理</a>
+      </aside>
+
+      <div class="admin-shell single-column">
+        <nav class="admin-tabs" data-admin-tabs role="tablist" aria-label="语音配置分类">
+          <button class="admin-tab" id="tab-capability" type="button" data-admin-tab="capability" aria-controls="panel-capability" role="tab">能力授权</button>
+          <button class="admin-tab" id="tab-model" type="button" data-admin-tab="model" aria-controls="panel-model" role="tab">声音与模型</button>
+          <button class="admin-tab" id="tab-prompts" type="button" data-admin-tab="prompts" aria-controls="panel-prompts" role="tab">角色与分析</button>
+        </nav>
+
+        <div class="admin-tab-panel" id="panel-capability" data-admin-panel="capability" role="tabpanel" aria-labelledby="tab-capability">
+          <section class="admin-panel page-hero">
+            <div>
+              <h2>能力授权</h2>
+              <p>密钥只保存在后端。APIKey 和 APISecret 留空保存时，会保留当前服务端已有值。</p>
+            </div>
+          </section>
+
+          <section class="admin-panel">
+            <div class="section-head">
+              <h2>授权与 Endpoint</h2>
+              <span>用于 IAT / LLM 能力，合成 Endpoint 在声音配置中统一维护</span>
+            </div>
+            <div class="form-grid">
+              <label>
+                <span>APPID</span>
+                <input id="adminAppId" type="text" autocomplete="off" />
+              </label>
+              <label>
+                <span>APIKey</span>
+                <input id="adminApiKey" type="password" autocomplete="new-password" placeholder="留空则不修改" />
+              </label>
+              <label>
+                <span>APISecret</span>
+                <input id="adminApiSecret" type="password" autocomplete="new-password" placeholder="留空则不修改" />
+              </label>
+              <label>
+                <span>听写 Endpoint</span>
+                <input id="adminIatEndpoint" type="text" autocomplete="off" />
+              </label>
+              <label>
+                <span>大模型 Endpoint</span>
+                <input id="adminLlmEndpoint" type="text" autocomplete="off" />
+              </label>
+            </div>
+          </section>
+        </div>
+
+        <div class="admin-tab-panel" id="panel-model" data-admin-panel="model" role="tabpanel" aria-labelledby="tab-model" hidden>
+          <section class="admin-panel page-hero">
+            <div>
+              <h2>播报与推理</h2>
+              <p>体验页会读取这里的声音名称和发音人编号；模型默认使用低延迟的 xopdeepseekv4flash。</p>
+            </div>
+          </section>
+
+          <section class="admin-panel">
+            <div class="section-head">
+              <h2>声音配置</h2>
+              <span>保留超拟人合成和在线语音合成两种能力</span>
+            </div>
+            <div class="form-grid compact">
+              <label>
+                <span>TTS 能力</span>
+                <select id="adminTtsProvider">
+                  <option value="super_smart">超拟人合成</option>
+                  <option value="standard">在线语音合成</option>
+                </select>
+              </label>
+              <label>
+                <span>声音名称</span>
+                <select id="adminVoiceName"></select>
+              </label>
+              <label>
+                <span>超拟人发音人编号</span>
+                <select id="adminVoiceCode"></select>
+              </label>
+              <label>
+                <span>超拟人 Endpoint</span>
+                <input id="adminTtsEndpoint" type="text" autocomplete="off" />
+              </label>
+              <label>
+                <span>在线 TTS 发音人编号</span>
+                <input id="adminStandardTtsVoice" type="text" autocomplete="off" />
+              </label>
+              <label>
+                <span>在线 TTS Endpoint</span>
+                <input id="adminStandardTtsEndpoint" type="text" autocomplete="off" />
+              </label>
+            </div>
+          </section>
+
+          <section class="admin-panel">
+            <div class="section-head">
+              <h2>模型配置</h2>
+              <span>用于对话回复和分析</span>
+            </div>
+            <div class="form-grid compact">
+              <label>
+                <span>模型</span>
+                <select id="adminModel"></select>
+              </label>
+              <label>
+                <span>Temperature</span>
+                <input id="adminTemperature" type="number" step="0.1" min="0" max="2" />
+              </label>
+              <label>
+                <span>Max Tokens</span>
+                <input id="adminMaxTokens" type="number" min="128" max="8192" />
+              </label>
+            </div>
+          </section>
+        </div>
+
+        <div class="admin-tab-panel" id="panel-prompts" data-admin-panel="prompts" role="tabpanel" aria-labelledby="tab-prompts" hidden>
+          <section class="admin-panel page-hero">
+            <div>
+              <h2>对话策略</h2>
+              <p>角色人设影响语音播报风格；分析提示词用于抽取购买意图、商品、数量和规格。</p>
+            </div>
+          </section>
+
+          <section class="admin-panel">
+            <div class="section-head">
+              <h2>提示词配置</h2>
+              <span>保存后下一轮对话生效</span>
+            </div>
+            <div class="prompt-grid">
+              <label>
+                <span>角色人设</span>
+                <textarea id="adminRolePrompt" rows="11"></textarea>
+              </label>
+              <label>
+                <span>商品分析提示词</span>
+                <textarea id="adminAnalysisPrompt" rows="11"></textarea>
+              </label>
+            </div>
+          </section>
+        </div>
+
+        <div class="admin-actions">
+          <span id="adminStatus">待保存</span>
+          <button id="adminSaveBottom" class="publish-btn">保存配置</button>
+        </div>
+      </div>
+    </main>
+
+    <script src="admin-time.js?v=20260730-admin-data"></script>
+    <script src="admin-auth.js?v=20260730-admin-data"></script>
+    <script src="admin.js?v=20260730-admin-data"></script>
+  </body>
+</html>

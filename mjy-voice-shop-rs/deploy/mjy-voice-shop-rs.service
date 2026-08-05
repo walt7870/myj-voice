@@ -1,0 +1,20 @@
+[Unit]
+Description=MJY Voice Shop Rust Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mjy-voice-shop-rs
+EnvironmentFile=-/opt/mjy-voice-shop-rs/.env
+Environment=HOST=0.0.0.0
+Environment=PORT=8787
+Environment=RUST_LOG=info
+ExecStart=/opt/mjy-voice-shop-rs/mjy-voice-shop-rs
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

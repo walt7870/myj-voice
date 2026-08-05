@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>接入管理 - 管理后台</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="styles.css?v=20260730-admin-data" />
+  </head>
+  <body class="admin-page">
+    <header class="app-header admin-header">
+      <div class="brand-block">
+        <div class="brand-mark">接</div>
+        <div>
+          <h1>接入管理</h1>
+          <p>集中查看设备协议和小程序 C 端接口调试</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <a href="./">体验页</a>
+      </div>
+    </header>
+
+    <main class="admin-layout">
+      <aside class="admin-menu" aria-label="后台菜单">
+        <div class="menu-title">管理菜单</div>
+        <a href="admin.html">概览</a>
+        <a href="admin-voice.html">语音配置</a>
+        <a href="admin-commerce.html">商品与订单</a>
+        <a href="admin-conversations.html">会话记录</a>
+        <a class="active" href="admin-integrations.html">接入管理</a>
+      </aside>
+
+      <div class="admin-shell single-column integrations-shell">
+        <nav class="admin-tabs" data-admin-tabs role="tablist" aria-label="接入管理分类">
+          <button class="admin-tab" id="tab-devices" type="button" data-admin-tab="devices" aria-controls="panel-devices" role="tab">设备接入</button>
+          <button class="admin-tab" id="tab-miniprogram" type="button" data-admin-tab="miniprogram" aria-controls="panel-miniprogram" role="tab">小程序 C 端</button>
+        </nav>
+
+        <div class="admin-tab-panel" id="panel-devices" data-admin-panel="devices" role="tabpanel" aria-labelledby="tab-devices">
+          <section class="admin-panel page-hero">
+            <div>
+              <h2>设备协议</h2>
+              <p>设备与体验页按服务端下发的音频档位通信，并通过 WebSocket 接收流式播放事件。</p>
+            </div>
+          </section>
+
+          <section class="admin-panel">
+            <div class="section-head">
+              <h2>接入接口</h2>
+              <span>设备侧按 token 接入 WebSocket</span>
+            </div>
+            <div class="protocol-grid admin-protocol">
+              <code>POST /api/device/auth</code>
+              <code>WS /api/device/voice?device_id=DOLL-0001</code>
+              <code>POST /api/device/status</code>
+              <code>GET /api/device/config</code>
+            </div>
+            <div class="page-hero-actions integration-auth-actions">
+              <a id="manageDeviceAuthorizations" class="primary-link" href="admin-authorizations.html">管理设备授权</a>
+            </div>
+          </section>
+
+          <section class="admin-panel">
+            <div class="section-head">
+              <h2>当前设备配置</h2>
+              <span>由后端接口实时返回</span>
+            </div>
+            <pre id="adminDeviceConfig"></pre>
+          </section>
+        </div>
+
+        <div class="admin-tab-panel miniprogram-shell" id="panel-miniprogram" data-admin-panel="miniprogram" role="tabpanel" aria-labelledby="tab-miniprogram" hidden>
+          <section class="admin-panel wide page-hero">
+            <div>
+              <h2>订单接口覆盖总览</h2>
+              <p>面向小程序 C 端订单链路整理接口目录、请求上下文、参数模板和响应预览；写操作在正式文档补齐前以预置 Mock 明确标识。</p>
+            </div>
+            <div class="page-hero-actions">
+              <div class="mini-hero-metrics">
+                <span><b id="miniTotalCount">-</b>已封装</span>
+                <span><b id="miniMockCount">-</b>预置 Mock</span>
+                <b id="miniStatus" class="status-pill">待调试</b>
+              </div>
+              <button id="miniRunAll" type="button">全部运行</button>
+            </div>
+          </section>
+
+          <section class="admin-panel mini-context-panel mini-sticky-panel">
+            <div class="section-head">
+              <h2>运行上下文</h2>
+              <span>统一请求 Header</span>
+            </div>
+            <div class="form-grid mini-header-grid">
+              <label><span>__app</span><input id="miniHeaderApp" value="mjy-miniapp" /></label>
+              <label><span>__appver</span><input id="miniHeaderAppVer" value="1.0.0" /></label>
+              <label><span>__company</span><input id="miniHeaderCompany" value="CC" /></label>
+              <label><span>CompanyCode</span><input id="miniHeaderCompanyCode" value="CC" /></label>
+              <label><span>__store</span><input id="miniHeaderStore" value="999006940" /></label>
+              <label><span>__storeno</span><input id="miniHeaderStoreNo" value="6634" /></label>
+              <label><span>__src_channel</span><input id="miniHeaderSrcChannel" value="2" /></label>
+              <label><span>debug</span><input id="miniHeaderDebug" value="true" /></label>
+              <label class="wide-field"><span>Authorization</span><input id="miniHeaderAuthorization" value="Bearer mock-token" /></label>
+            </div>
+          </section>
+
+          <section class="admin-panel mini-workbench-panel">
+            <div class="section-head">
+              <h2>接口目录</h2>
+              <span id="miniInterfaceCount">加载中</span>
+            </div>
+            <div id="miniInterfaces" class="mini-interface-list"></div>
+          </section>
+
+          <section class="admin-panel mini-request-panel">
+            <div class="section-head">
+              <h2>请求与参数</h2>
+              <span id="miniRequestSummary">选择接口后编辑</span>
+            </div>
+            <div id="miniRequestDetail" class="mini-request-detail"></div>
+          </section>
+
+          <section class="admin-panel mini-response-panel">
+            <div class="section-head">
+              <h2>响应预览</h2>
+              <span id="miniResultSummary">尚未调试</span>
+            </div>
+            <pre id="miniResult" class="debug-json-output">{}</pre>
+          </section>
+
+          <section class="admin-panel wide mini-coverage-panel">
+            <div class="section-head">
+              <h2>接口覆盖状态</h2>
+              <span>正式文档与预置 Mock 的边界</span>
+            </div>
+            <div id="miniMissingInterfaces" class="mini-missing-list"></div>
+          </section>
+        </div>
+      </div>
+    </main>
+
+    <script src="admin-time.js?v=20260730-admin-data"></script>
+    <script src="admin-auth.js?v=20260730-admin-data"></script>
+    <script src="admin.js?v=20260730-admin-data"></script>
+  </body>
+</html>

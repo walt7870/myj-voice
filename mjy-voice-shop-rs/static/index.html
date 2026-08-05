@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>美宜佳测试 - 语音购物体验</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand-block">
+        <div class="brand-mark">佳</div>
+        <div>
+          <h1>美宜佳语音购物体验</h1>
+          <p>语音对话 · 商品识别 · 订单下发</p>
+        </div>
+      </div>
+      <nav class="page-tabs" aria-label="页面导航">
+        <a class="active" href="./">体验页</a>
+        <a href="admin.html">管理后台</a>
+      </nav>
+    </header>
+
+    <main class="studio">
+      <section class="column config-column">
+        <h2>体验配置</h2>
+
+        <div class="summary-card">
+          <div class="summary-head configurable-head">
+            <div class="title-inline">
+              <span class="dot"></span>
+              <strong>角色与回复</strong>
+            </div>
+            <button id="promptConfigOpen" class="mini-config-btn" type="button">配置</button>
+          </div>
+          <div id="rolePrompt" class="persona-box persona-summary"></div>
+        </div>
+
+        <div class="summary-card compact-summary">
+          <div class="summary-head">
+            <span class="dot audio"></span>
+            <strong>语音能力</strong>
+          </div>
+          <label class="switch-card" for="ttsNoInterruptControl">
+            <span>
+              <strong>播报静音</strong>
+              <small>TTS 播报期间停止拾音，播完后自动恢复</small>
+            </span>
+            <input id="ttsNoInterruptControl" type="checkbox" checked disabled aria-label="播报期间固定停止拾音" />
+            <i aria-hidden="true"></i>
+          </label>
+          <input id="ttsInterruptWordControl" type="hidden" value="停一下" />
+          <div class="setting-card">
+            <div>
+              <strong>通用-中英识别</strong>
+              <small>近场 · PCM 16kHz · slm</small>
+            </div>
+            <span class="gear">⌾</span>
+          </div>
+          <div class="setting-card voice-card voice-editor">
+            <div class="avatar small">佳</div>
+            <div class="voice-fields">
+              <label>
+                <span>TTS 能力</span>
+                <select id="ttsProviderControl" class="inline-control">
+                  <option value="super_smart">超拟人合成</option>
+                  <option value="standard">在线语音合成</option>
+                </select>
+              </label>
+              <label>
+                <span>声音名称</span>
+                <select id="voiceNameControl" class="inline-control"></select>
+              </label>
+              <label>
+                <span>发音人编号</span>
+                <select id="voiceCodeControl" class="inline-control"></select>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="summary-card">
+          <div class="summary-head">
+            <span class="dot model"></span>
+            <strong>模型与断句</strong>
+          </div>
+          <div class="model-card">
+            <div class="model-logo">鲸</div>
+            <div class="model-info">
+              <select id="modelControl" class="model-select-inline" aria-label="模型选择"></select>
+              <div class="model-tags">
+                <span>工具调用</span>
+                <span>多语言</span>
+                <span>文本生成</span>
+                <span>低延迟</span>
+              </div>
+            </div>
+          </div>
+          <div class="quick-config-actions">
+            <span id="quickConfigStatus">参数已加载</span>
+            <button id="quickConfigSave" type="button">应用参数</button>
+          </div>
+          <div class="tuning-panel" aria-label="录音断句参数">
+            <label>
+              <span>静默断句</span>
+              <input id="silenceMsControl" type="number" min="250" max="400" step="10" />
+              <em>ms</em>
+            </label>
+            <label>
+              <span>最短成句</span>
+              <input id="minSpeechMsControl" type="number" min="300" max="500" step="10" />
+              <em>ms</em>
+            </label>
+            <label>
+              <span>拾音灵敏度</span>
+              <input id="thresholdControl" type="number" min="0.006" max="0.05" step="0.002" />
+            </label>
+            <label>
+              <span>前置缓存</span>
+              <input id="preSpeechMsControl" type="number" min="200" max="300" step="10" />
+              <em>ms</em>
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <section class="column voice-column">
+        <div class="preview-head">
+          <h2>语音交互</h2>
+          <span id="status" class="sr-only" aria-live="polite">待体验</span>
+        </div>
+
+        <div class="portrait-zone">
+          <div class="pulse-ring ring-1"></div>
+          <div class="pulse-ring ring-2"></div>
+          <div class="pulse-ring ring-3"></div>
+          <div class="avatar hero">佳</div>
+        </div>
+
+        <div class="claim">
+          <h3>端到端<span>真人级语音对话</span></h3>
+          <p>语音交流链路优先低延迟返回，对话分析链路并行识别购买意图和商品命中。</p>
+        </div>
+
+        <div class="experience-card voice-console">
+          <div id="messages" class="messages"></div>
+          <div class="latency-row">
+            <span>链路耗时</span>
+            <strong id="latency">等待输入</strong>
+          </div>
+          <textarea id="textInput" rows="2" placeholder="试试：买两瓶可乐和一瓶水"></textarea>
+          <div class="call-actions">
+            <button class="round-btn" id="keyboardBtn" aria-label="键盘">⌨</button>
+            <button id="micBtn" class="call-btn">
+              <span class="button-signal" aria-hidden="true">
+                <span class="music-note">♪</span>
+                <i></i>
+                <i></i>
+                <i></i>
+              </span>
+              <span class="mic-label">☎ 开始持续监听</span>
+            </button>
+            <button id="sendText" class="send-btn">发送文字</button>
+          </div>
+          <small class="ai-note">内容由 AI 生成，仅供参考</small>
+        </div>
+      </section>
+
+      <section class="column cart-column">
+        <div class="cart-head">
+          <h2>下单意向</h2>
+          <div class="cart-actions">
+            <span id="roundText">本轮待开启</span>
+            <button id="newRoundBtn" type="button">新一轮</button>
+          </div>
+        </div>
+        <div id="analysisLog" class="analysis-log"></div>
+        <div id="draft" class="draft cart-panel">
+          <div class="shopping-panel empty">
+            <h2>购物识别</h2>
+            <p>说出想买的商品后，这里会展示待下发订单。</p>
+          </div>
+        </div>
+        <div class="latency-panel">
+          <div class="latency-panel-head">
+            <h2>链路诊断</h2>
+            <span id="latencyTraceId">等待语音</span>
+          </div>
+          <div id="latencyStages" class="latency-stages">
+            <div class="latency-stage idle">
+              <span>开始推流</span>
+              <strong>--</strong>
+            </div>
+            <div class="latency-stage idle">
+              <span>服务端接收</span>
+              <strong>--</strong>
+            </div>
+            <div class="latency-stage idle">
+              <span>转写完成</span>
+              <strong>--</strong>
+            </div>
+            <div class="latency-stage idle">
+              <span>首段回复</span>
+              <strong>--</strong>
+            </div>
+            <div class="latency-stage idle">
+              <span>TTS 首包</span>
+              <strong>--</strong>
+            </div>
+            <div class="latency-stage idle">
+              <span>开始播报</span>
+              <strong>--</strong>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="promptDialog" class="config-dialog">
+      <form method="dialog">
+        <header>
+          <div>
+            <h2>角色与回复配置</h2>
+            <p>调整玩偶回复风格和购买意图分析提示词。</p>
+          </div>
+          <button id="promptConfigClose" class="dialog-close" type="button" aria-label="关闭">×</button>
+        </header>
+        <div class="dialog-body">
+          <label>
+            <span>角色人设</span>
+            <textarea id="rolePromptControl" rows="6"></textarea>
+          </label>
+          <label>
+            <span>购买分析提示词</span>
+            <textarea id="analysisPromptControl" rows="5"></textarea>
+          </label>
+        </div>
+        <footer>
+          <span id="promptConfigStatus">配置已加载</span>
+          <button id="promptConfigSave" type="button">保存配置</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <script src="app.js"></script>
+  </body>
+</html>

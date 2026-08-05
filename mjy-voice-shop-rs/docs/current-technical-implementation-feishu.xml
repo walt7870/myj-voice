@@ -1,0 +1,178 @@
+<title>美宜佳语音购物服务当前技术实现说明</title>
+
+<h1>1. 文档目的与结论</h1>
+<p>本文整理截至 2026-08-04 的美宜佳语音购物 Rust 服务当前实现，面向研发交接、设备联调、订单 MCP 联调和后续迭代评审。说明范围以本地仓库 <code>mjy-voice-shop-rs</code> 与配套 <code>client/</code>、<code>SDKs/</code> 为准，重点解释服务入口、实时语音链路、业务 turn 编排、订单接入、管理后台、安全边界和代码层次。</p>
+<p>当前服务不是一个简单的大模型聊天页面，而是一套“设备/浏览器音频接入 + 讯飞 ASR/LLM/TTS + 服务端规则化订单分析 + MCP/本地 mock 订单兜底 + 管理后台 + 设备 SDK”的打样闭环。代码上，<code>main.rs</code> 负责启动和状态组装，<code>web/mod.rs</code> 承担主要编排，<code>xfyun/</code> 负责讯飞 provider 适配，<code>db.rs</code> 负责 SQLite 持久化，<code>domain/</code> 放置音频、设备、商品匹配和订单客户端等可复用逻辑。</p>
+
+<callout emoji="📌" background-color="light-blue" border-color="blue" text-color="blue">
+  <p>实现核心：ASR partial 只用于展示和诊断；LLM 回复、商品匹配、订单草稿、确认下单和退单判断都等待 ASR final 后进入同一个业务 turn。播报打断只取消旧轮回复/播放侧输出，不取消已经启动的商品分析和订单写动作。</p>
+</callout>
+
+<h1>2. 总体架构</h1>
+<p>服务端使用 Rust <code>axum + tokio + sqlite + tokio-tungstenite</code>。浏览器体验页、管理后台静态资源由同一服务托管；设备侧通过 HTTP 鉴权和 WebSocket 实时语音协议接入；订单写查通过可配置 MCP Server 调用，MCP 未启用或不可用时回落本地 mock order。</p>
+
+<whiteboard type="mermaid">
+flowchart LR
+    Device["玩偶设备 / C 端 SDK\n拾音、VAD、TTS 播放、按键打断"] --> Auth["HTTP 鉴权与配置\n/api/device/config\n/api/device/auth"]
+    Browser["浏览器体验页\nstatic/app.js"] --> ChatWS["WS /api/chat/voice"]
+    Auth --> DeviceWS["WS /api/device/voice"]
+    DeviceWS --> Web["web/mod.rs\n协议解析、ASR 会话、turn 编排"]
+    ChatWS --> Web
+    Web --> DB[("SQLite\n配置、商品、设备、会话、事件、订单")]
+    Web --> IAT["讯飞 IAT\nASR 流式转写"]
+    Web --> LLM["讯飞 LLM\n流式生成回复"]
+    Web --> TTS["讯飞 TTS\n超拟人/标准合成"]
+    Web --> Order["订单接入层\nMCP tools 或本地 mock"]
+    Order --> MCP["mjy-order-mcp / 客户 MCP Server\nJSON-RPC tools/call"]
+    Web --> Admin["管理后台 API\n配置、商品、会话、设备授权"]
+</whiteboard>
+
+<h1>3. 运行启动与状态组装</h1>
+<p><code>src/main.rs</code> 是一个很薄的启动入口。启动时先加载 <code>.env</code>，初始化 tracing，再读取 <code>HOST</code>、<code>PORT</code> 和 <code>DATABASE_URL</code>。SQLite 使用 <code>create_if_missing(true)</code>，随后调用 <code>db::init</code> 创建业务表并 seed 默认配置、商品和演示设备，再调用 <code>admin_auth::init_schema</code> 创建后台 session 表。</p>
+<p>后台密码策略有明确环境边界：如果绑定 loopback 且没有 <code>ADMIN_PASSWORD_HASH</code>，使用开发默认密码哈希；如果绑定公网地址，缺少 <code>ADMIN_PASSWORD_HASH</code> 会直接启动失败。最终构造的 <code>AppState</code> 包含数据库连接池、服务端签名密钥、后台认证配置和 diagnostics 广播通道，然后交给 <code>web::router(state)</code>。</p>
+
+<table>
+  <thead><tr><th background-color="light-gray">状态字段</th><th background-color="light-gray">用途</th><th background-color="light-gray">主要消费者</th></tr></thead>
+  <tbody>
+    <tr><td><code>pool</code></td><td>SQLite 连接池，承载配置、商品、设备、会话、事件和订单存储。</td><td><code>web</code>、<code>admin</code>、订单链路</td></tr>
+    <tr><td><code>server_secret</code></td><td>设备短期 token 的签名与验签。</td><td><code>/api/device/auth</code>、<code>/api/device/voice</code></td></tr>
+    <tr><td><code>admin_config</code></td><td>后台用户名、密码哈希、session 指纹和 cookie 策略。</td><td><code>web/admin.rs</code></td></tr>
+    <tr><td><code>diagnostics</code></td><td>链路诊断事件广播，用于本机调试和 latency 面板。</td><td><code>/api/diagnostics/latency</code></td></tr>
+  </tbody>
+</table>
+
+<h1>4. 路由与访问边界</h1>
+<p>路由集中定义在 <code>src/web/mod.rs</code>。公开路径包括健康检查、公开配置、文本聊天、浏览器语音 WebSocket、设备鉴权、设备配置、设备状态和设备语音 WebSocket。内部管理路径包括后台配置、商品、会话、诊断、订单查询写入、debug 小程序 C 端接口和 mock 小程序订单接口。</p>
+<p>内部管理路径由中间件统一保护，覆盖 <code>/api/admin</code>、<code>/api/debug</code>、<code>/mock</code>、<code>/api/order</code>、<code>/api/orders</code> 和 <code>/api/diagnostics</code> 命名空间。本机 loopback 且反代来源可信时可直通；公网访问则必须通过后台登录 session，并对状态变更请求执行同源 Origin 校验和登录失败限频。公开语音体验页和设备协议保持可访问，但设备 WebSocket 必须先通过设备 token 和设备启用状态校验。</p>
+
+<h1>5. 数据模型与持久化</h1>
+<p><code>src/db.rs</code> 负责建表、seed 和数据访问。当前使用轻量 SQLite，表结构服务于打样闭环和后台排障，不是完整生产交易库。</p>
+<table>
+  <thead><tr><th background-color="light-gray">表</th><th background-color="light-gray">职责</th><th background-color="light-gray">关键说明</th></tr></thead>
+  <tbody>
+    <tr><td><code>app_config</code></td><td>保存讯飞、LLM、TTS、订单 MCP、prompt 等配置 JSON。</td><td>后台可热更新；音频 provider 在 WebSocket 连接协商后形成连接快照。</td></tr>
+    <tr><td><code>products</code></td><td>演示商品库。</td><td>用于服务端规则化商品匹配，支持别名、规格、价格。</td></tr>
+    <tr><td><code>devices</code></td><td>设备授权。</td><td>保存设备 ID、密钥哈希、名称和启停状态。</td></tr>
+    <tr><td><code>conversations</code></td><td>对话主表。</td><td>包含 <code>device_id</code>，用于区分浏览器会话和设备会话所有者。</td></tr>
+    <tr><td><code>conversation_messages</code></td><td>用户/助手消息。</td><td>按 turn 记录，可用于后台查看和后续订单边界判断。</td></tr>
+    <tr><td><code>turn_events</code></td><td>业务事件日志。</td><td>记录 intent、商品命中、订单草稿、下单、退款、结束等事件。</td></tr>
+    <tr><td><code>mock_orders</code></td><td>本地订单兜底存储。</td><td>MCP 未启用或失败时保存 mock 订单；MCP 成功订单也会归一化持久化，便于会话内查询。</td></tr>
+  </tbody>
+</table>
+
+<h1>6. 音频协议与能力协商</h1>
+<p>设备启动后应先调用 <code>GET /api/device/config</code> 读取当前 provider 支持的 <code>audio_profiles</code>，再用 <code>POST /api/device/auth</code> 换取短期 token，最后用四个固定参数连接 <code>/api/device/voice?in_format=...&amp;in_rate=...&amp;out_format=...&amp;out_rate=...</code>。浏览器体验页固定使用 <code>pcm/16000</code> 上行和 <code>mp3/16000</code> 下行。</p>
+<p>服务端只做 profile 校验、base64 解码/编码、包大小和包边界检查，不做转码、不重采样、不封装 Ogg，也不根据文件头猜测格式。讯飞 IAT/TTS 的 provider 能力由 <code>src/xfyun/audio.rs</code> 定义，连接建立时会同时校验输入 profile 是否被 IAT provider 支持、输出 profile 是否被 TTS provider 支持。</p>
+
+<h1>7. 实时语音 WebSocket 主链路</h1>
+<p><code>handle_ws</code> 是设备和浏览器语音连接的共同处理函数。它把 WebSocket 拆成 reader 和 writer，两条内部事件队列分别承载普通回复事件与控制事件；控制事件通过 biased select 优先下发，保证按键打断 ack 不被大量音频或回复事件阻塞。</p>
+
+<whiteboard type="mermaid">
+sequenceDiagram
+    participant C as 设备/浏览器
+    participant W as handle_ws
+    participant I as 讯飞 IAT
+    participant T as RecognizedTurn
+    participant L as LLM/TTS 回复链路
+    participant A as 业务分析链路
+
+    C->>W: audio_stream_start(conversation_id, trace_id)
+    W->>W: 分配 conversation_id / turn_id\n创建 LiveAsrSession
+    C->>W: audio_stream_chunk(base64 audio)
+    W->>W: 解码、profile 校验、包边界校验
+    W->>I: 转发 IAT frame
+    I-->>W: asr_partial
+    W-->>C: asr_partial
+    C->>W: audio_stream_end
+    W->>I: IAT last frame
+    I-->>W: ASR final text
+    W->>T: handoff recognized text
+    T->>L: 启动 LLM/TTS 回复
+    T->>A: 启动商品/订单分析
+    L-->>C: llm_delta / reply_sentence / tts_audio_chunk / voice_done
+    A-->>C: intent_analysis / product_matches / order_draft / order_created / analysis_done
+</whiteboard>
+
+<p>流式输入有三个核心事件：<code>audio_stream_start</code> 创建 <code>LiveAsrSession</code>；<code>audio_stream_chunk</code> 将解码后的音频包送入 ASR channel；<code>audio_stream_end</code> 关闭输入并向讯飞发送 last frame。兼容入口 <code>audio_segment</code> 可用于 PCM/MP3 整段音频，文本联调则可直接发送 <code>text</code> 字段跳过 ASR。</p>
+<p><code>LiveAsrSession</code> 只负责输入音频和 ASR final。识别到有效文本后，会创建 <code>RecognizedTurn</code> 并脱离当前 ASR session 运行。这个设计很关键：后续新一轮录音替换或停止 live ASR session，不会取消上一轮已经识别出来的业务处理。</p>
+
+<h1>8. Turn 编排、并发控制与打断</h1>
+<p>每个业务 turn 由 <code>WsTurnCoordinator</code> 管理容量和顺序。当前每条连接最多允许 64 个在途 turn，分析队列最多 64 个。分析阶段通过 ticket 和 mutex 串行化，避免同一连接里订单草稿、下单和退款顺序交错。turn 容量 permit 会被 TTS provider 生命周期持有，直到回复输出或取消收敛后释放。</p>
+
+<whiteboard type="mermaid">
+flowchart TD
+    Final["ASR final / 文本输入"] --> Prep["prepare_analysis_turn\n确保会话归属、保存 user message、计算本轮待下单文本"]
+    Prep --> Emit["发送 asr_final"]
+    Emit --> Parallel{"并行处理"}
+    Parallel --> Reply["回复链路\n读取热更新 prompt\n构造 system + order context\n调用 LLM 流式输出"]
+    Reply --> Split["断句 / 文本帧"]
+    Split --> TTS["TTS 合成\n超拟人文本流或按句并行"]
+    TTS --> Down["tts_audio_chunk 下行\n最后 voice_done"]
+    Parallel --> Analyze["分析链路\n商品匹配、确认/退单/结束判断"]
+    Analyze --> Events["intent_analysis\nproduct_matches\norder_draft\norder_created/order_refunded\nanalysis_done"]
+    Events --> Persist["写入 turn_events"]
+    Down --> Settle["等待分析尾事件后输出 latency_metrics"]
+    Persist --> Settle
+</whiteboard>
+
+<p>按键打断事件为 <code>tts_interrupt</code>，必须携带当前连接已经收到的 <code>conversation_id</code>、<code>turn_id</code> 和 <code>source=button</code>。服务端通过 <code>TurnInterruptRegistry</code> 将该 turn 标记为 interrupted，并优先返回 <code>tts_interrupted</code>。打断只过滤旧轮 <code>llm_delta</code>、<code>reply_sentence</code>、<code>tts_audio_chunk</code>、<code>voice_done</code>，不取消已经启动的商品匹配和订单动作，因此旧轮的业务尾事件仍会到达。</p>
+
+<h1>9. LLM 与 TTS 回复链路</h1>
+<p>LLM 入口在 <code>src/xfyun/llm.rs</code>。服务端根据配置构造讯飞 Chat payload，使用签名 WebSocket 连接，解析每个 <code>ChatChunk</code> 并向业务层发送文本增量。回复链路在 <code>run_turn_with_interrupt</code> 中完成 prompt 组装：基础角色 prompt 来自配置，若当前会话存在订单草稿或有效订单，则额外加入订单上下文 prompt，约束模型不要提前承诺已下单或误把结束表达理解为退单。</p>
+<p>TTS 有两种路径。当前默认 super smart provider 时，服务端使用“LLM token 流 → TTS 文本帧 → TTS 音频 chunk”的流式路径，尽早把可播片段送到设备或浏览器。standard provider 或非流式场景下，服务端按完整句子切分，启动 TTS 任务并把音频 chunk 转成 <code>StreamEvent::tts_audio_chunk</code> 下行。所有下行 TTS 事件都带有 format、sample_rate、channels，PCM 额外带 bit_depth，客户端必须按连接协商结果校验。</p>
+
+<h1>10. 商品、意图与订单链路</h1>
+<p>当前订单动作不是由 LLM 直接调用工具，而是由服务端 <code>analyze_turn</code> 进行确定性判断。商品匹配来自 <code>domain/matching.rs</code>，基于商品名和别名做包含匹配，并从商品名前缀识别中文数字或阿拉伯数字数量。匹配结果生成 <code>product_matches</code> 和 <code>order_draft</code>。确认下单、结束对话和退单由服务端规则函数判断，规则仍会排除“不要下单”“不退款”“退下/推下”等容易误触发的表达，但会把“退单”“退款”“取消订单”这类明确售后请求直接识别为退单意图。</p>
+
+<whiteboard type="mermaid">
+flowchart TD
+    UserText["ASR final 文本"] --> Match["match_products\n按商品名/别名和数量规则匹配"]
+    Match --> Active["latest_active_conversation_order\n查本会话未关闭订单"]
+    Active --> Intent{"意图规则判断"}
+    Intent -->|有商品且未确认| Draft["order_draft\nawaiting_confirmation"]
+    Intent -->|确认且有商品| SubmitStart["order_submit_started"]
+    Intent -->|明确退单且有有效订单| RefundStart["order_refund_started"]
+    Intent -->|结束表达且非退单| End["conversation_ended"]
+    SubmitStart --> Submit["submit_order"]
+    Submit --> Enabled{"order_mcp_enabled?"}
+    Enabled -->|否| Local["create_local_mock_order\n写 mock_orders"]
+    Enabled -->|是| Resolve["resolve_order_context"]
+    Resolve --> Authz["authorize_member"]
+    Authz --> Preview["preview_order"]
+    Preview --> Create["create_order"]
+    Authz -->|失败| Local
+    Preview -->|失败| Local
+    Create -->|MCP 不可用/未配置| Local
+    Create -->|成功且提取到订单号| Persist["persist_order_mcp_result\n归一化并写 mock_orders"]
+    RefundStart --> Refund["refund_submitted_order\nMCP refund 或 local mock refund"]
+</whiteboard>
+
+<p><code>submit_order</code> 的真实顺序是：读取配置；如果 MCP 未启用，则直接生成本地 mock 订单并记录 fallback 事件；如果 MCP 启用，先解析订单上下文，再调用 <code>authorize_member</code>，随后 <code>preview_order</code>，最后 <code>create_order</code>。任一阶段出现 MCP 未配置、不可用、JSON-RPC 错误或工具结果不可解析，都走本地 mock 兜底。MCP 成功后会提取订单号，将结果补齐 <code>ok</code>、<code>saleOrderId</code>、<code>conversation_id</code>、<code>items</code> 和 <code>context</code> 后保存，方便后续退单和后台查看。</p>
+
+<h1>11. 设备端与浏览器端职责</h1>
+<p>浏览器体验页主要用于演示和链路诊断，固定走公开 <code>/api/chat/voice</code>，前端负责麦克风权限、VAD、PCM 采集、TTS prebuffer、MediaSource 播放、播报期间拾音门控和右侧订单/诊断展示。设备端则通过 <code>client/</code> 和 <code>SDKs/</code> 参考实现接入：先鉴权，再建立 WebSocket，发送 <code>audio_stream_start/chunk/end</code>，收到 <code>tts_audio_chunk</code> 后立即写入 decoder/DAC。</p>
+<p>真实设备侧必须坚持两个原则。第一，业务逻辑不要写进固件，固件只做拾音、编码、网络、播放、按键和状态上报。第二，按键打断要先本地停止播放器并清空待播队列，再通知服务端；服务端 ack 不应该成为恢复拾音的前置条件。</p>
+
+<h1>12. 管理后台与调试能力</h1>
+<p>后台由静态页面和内部 API 组成，主要用于配置讯飞与模型参数、维护商品库、查看会话消息与事件、管理设备授权、配置订单 MCP Server 和工具映射。公网访问后台需要 session 登录，本机或可信 loopback 调试可直通。诊断 WebSocket 用于本机链路分析，事件包括 audio received、ASR done、LLM first token、TTS first chunk、TTS done、上/下行 relay duration 和 latency metrics。</p>
+
+<h1>13. 安全与边界</h1>
+<p>设备鉴权使用设备独立 secret 换短期 token，token 由服务端 secret HMAC 签名并带过期时间。演示设备 <code>DOLL-0001 / demo-secret</code> 只允许本机或 SSH 隧道调试，公网不能用它换取可用设备 token。公开配置不下发真实设备密钥、讯飞密钥或 MCP token。后台 session 使用 Argon2 密码哈希和 opaque token 的 SHA256 哈希入库，配置指纹变化会使旧 session 失效。</p>
+<p>音频边界上，服务端拒绝超过大小限制、非法 base64、非法 PCM 包长、Speex 错误包长、packetized codec 走整段事件等情况。上游讯飞返回的音频 profile 类错误会被分类为可理解的错误事件，同时写入诊断证据，但不会泄露密钥或签名 URL。</p>
+
+<h1>14. 当前代码层次评价与后续拆分建议</h1>
+<p>目前代码功能完整、测试覆盖较多，但 <code>src/web/mod.rs</code> 已经偏重，集中承载了路由、WebSocket 协议、ASR session、turn coordinator、LLM/TTS 编排、意图分析、订单提交、mock 小程序接口和大量测试。短期继续迭代可以接受；如果后续要进入更长期维护，建议按职责拆分，减少单文件认知负担。</p>
+<table>
+  <thead><tr><th background-color="light-gray">建议模块</th><th background-color="light-gray">可迁移职责</th><th background-color="light-gray">收益</th></tr></thead>
+  <tbody>
+    <tr><td><code>voice_session</code></td><td>WebSocket 输入事件、LiveAsrSession、音频包校验、ASR handoff。</td><td>隔离协议状态机，便于设备协议扩展。</td></tr>
+    <tr><td><code>turn_orchestrator</code></td><td>run_turn、interrupt registry、LLM/TTS 流式编排、输出过滤。</td><td>让回复链路和取消语义更清晰。</td></tr>
+    <tr><td><code>order_service</code></td><td>analyze_turn、订单上下文 prompt、submit/refund/list/detail、MCP fallback。</td><td>便于真实 MCP 联调和订单规则测试。</td></tr>
+    <tr><td><code>diagnostics</code></td><td>DiagnosticEvent、relay metric、友好错误分类。</td><td>减少 web 层噪音，统一观测语义。</td></tr>
+    <tr><td><code>mock_miniprogram</code></td><td>小程序 C 端 mock/debug 接口。</td><td>避免 mock 路由污染主业务文件。</td></tr>
+  </tbody>
+</table>
+
+<h1>15. 验证与交付门禁</h1>
+<p>日常修改 Rust 业务逻辑后应运行 <code>cargo test</code>。修改浏览器语音体验、TTS 播放、打断、订单事件展示后应运行 <code>npm run voice:check</code>。修改音频协议或 profile 能力后应运行 <code>npm run audio:check</code> 和 SDK 自检。发布到 JD 前使用 <code>scripts/deploy-jd.sh</code>，发布后至少验证公网 <code>/api/health</code>、公开配置、管理门禁、WebSocket smoke 和关键静态资源哈希。</p>
+<p>后续最关键的联调风险仍然在真实设备侧：GPIO 按键消抖、decoder/DAC/DMA/I2S 立即停播、旧轮 pair 过滤、恢复拾音时序、网络断线重连和真实环境 P50/P95 延迟。这些不在当前 Rust 仓库完整覆盖范围内，需要在板端固件仓库补齐。</p>

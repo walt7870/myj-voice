@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>会话记录 - 管理后台</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="styles.css?v=20260730-admin-data" />
+  </head>
+  <body class="admin-page">
+    <header class="app-header admin-header">
+      <div class="brand-block">
+        <div class="brand-mark">话</div>
+        <div>
+          <h1>会话记录</h1>
+          <p>按一轮对话查看用户输入、系统回复和购买意向上下文</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <a href="./">体验页</a>
+      </div>
+    </header>
+
+    <main class="admin-layout">
+      <aside class="admin-menu" aria-label="后台菜单">
+        <div class="menu-title">管理菜单</div>
+        <a href="admin.html">概览</a>
+        <a href="admin-voice.html">语音配置</a>
+        <a href="admin-commerce.html">商品与订单</a>
+        <a class="active" href="admin-conversations.html">会话记录</a>
+        <a href="admin-integrations.html">接入管理</a>
+      </aside>
+
+      <div class="admin-shell single-column">
+        <section class="admin-panel page-hero">
+          <div>
+            <h2>对话轮次</h2>
+            <p>体验页点击“新一轮”会生成新的轮次；同一轮内的多次语音或文字输入会合并用于购买内容识别。</p>
+          </div>
+        </section>
+
+        <section class="admin-panel conversation-admin-panel">
+          <div class="section-head">
+            <h2>最近对话</h2>
+            <div class="section-meta">
+              <span id="conversationPageInfo">分页加载</span>
+              <b id="adminStatus">加载中</b>
+            </div>
+          </div>
+          <div class="conversation-admin-grid">
+            <div id="conversationList" class="conversation-list"></div>
+            <div id="conversationDetail" class="conversation-detail empty">
+              <h3>选择一轮对话</h3>
+              <p>右侧会展示这一轮的用户输入和系统回复。</p>
+            </div>
+          </div>
+          <div id="conversationPager" class="pagination-bar">
+            <button id="conversationPrev" type="button">上一页</button>
+            <span id="conversationPageText">第 1 / 1 页</span>
+            <button id="conversationNext" type="button">下一页</button>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <script src="admin-time.js?v=20260730-admin-data"></script>
+    <script src="admin-auth.js?v=20260730-admin-data"></script>
+    <script src="admin.js?v=20260730-admin-data"></script>
+  </body>
+</html>

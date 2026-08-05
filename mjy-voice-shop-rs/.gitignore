@@ -1,0 +1,6 @@
+/target/
+/mjy_voice_shop.db*
+/.env
+/.run/
+/logs/
+/.superpowers/
