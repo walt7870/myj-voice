@@ -149,11 +149,15 @@ cargo clippy --all-targets --all-features -- -D warnings
 日常发布入口：
 
 ```bash
-cd mjy-voice-shop-rs
-REMOTE=root@jd ROTATE_ADMIN_CREDENTIALS=0 bash scripts/deploy-jd.sh
+cd <checkout-dir>/mjy-voice-shop-rs
+REMOTE=<ssh-user>@<server-host> \
+APP_DIR=<remote-app-dir> \
+SRC_DIR=<remote-source-dir> \
+ROTATE_ADMIN_CREDENTIALS=0 \
+bash scripts/deploy-jd.sh
 ```
 
-发布脚本会在远端构建 release 二进制、备份旧版本和 SQLite、安装 systemd 服务并执行本机健康检查；它不会上传 `.env`，也不会替你配置 Nginx TLS 和防火墙。
+发布脚本要求显式传入目标主机和目录，会在远端构建 release 二进制、备份旧版本和 SQLite、按目标目录渲染 systemd 服务并执行本机健康检查；它不会上传 `.env`，也不会替你配置 Nginx TLS 和防火墙。
 
 ## 安全约定
 

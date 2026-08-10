@@ -5,12 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/mjy-voice-shop-rs
-EnvironmentFile=-/opt/mjy-voice-shop-rs/.env
+# This template is rendered by scripts/deploy-jd.sh before installation.
+WorkingDirectory=@@APP_DIR@@
+EnvironmentFile=-@@APP_DIR@@/.env
 Environment=HOST=0.0.0.0
-Environment=PORT=8787
+Environment=PORT=@@PORT@@
 Environment=RUST_LOG=info
-ExecStart=/opt/mjy-voice-shop-rs/mjy-voice-shop-rs
+ExecStart=@@APP_DIR@@/mjy-voice-shop-rs
 Restart=always
 RestartSec=3
 KillSignal=SIGTERM

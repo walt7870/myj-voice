@@ -4,13 +4,19 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-REMOTE="${REMOTE:-root@jd}"
-APP_DIR="${APP_DIR:-/opt/mjy-voice-shop-rs}"
-SRC_DIR="${SRC_DIR:-/opt/mjy-voice-shop-rs-src}"
+REMOTE="${REMOTE:?REMOTE is required (for example deploy@server.example.com)}"
+APP_DIR="${APP_DIR:?APP_DIR is required (for example /srv/mjy-voice-shop-rs)}"
+SRC_DIR="${SRC_DIR:?SRC_DIR is required (for example /srv/mjy-voice-shop-rs-src)}"
 SERVICE_NAME="${SERVICE_NAME:-mjy-voice-shop-rs.service}"
-OLD_SERVICE_NAMES="${OLD_SERVICE_NAMES:-mjy-order-mcp.service mjy_order_mcp.service mjy-mcp.service cbm_mcp.service}"
-OLD_APP_DIRS="${OLD_APP_DIRS:-/opt/mjy-order-mcp /opt/mjy_order_mcp /opt/cbm_mcp}"
 ROTATE_ADMIN_CREDENTIALS="${ROTATE_ADMIN_CREDENTIALS:-0}"
+
+for path_name in APP_DIR SRC_DIR; do
+  path_value="${!path_name}"
+  if [[ "$path_value" != /* || "$path_value" == *[[:space:]]* ]]; then
+    echo "$path_name must be an absolute path without whitespace: $path_value" >&2
+    exit 2
+  fi
+done
 
 if [[ "$ROTATE_ADMIN_CREDENTIALS" != "0" && "$ROTATE_ADMIN_CREDENTIALS" != "1" ]]; then
   echo "ROTATE_ADMIN_CREDENTIALS must be 0 or 1" >&2
@@ -41,7 +47,7 @@ echo "Uploading source package to ${REMOTE}..."
 scp "$TMP_DIR/mjy-voice-shop-rs-source.tar.gz" "${REMOTE}:/tmp/mjy-voice-shop-rs-source.tar.gz"
 
 echo "Building and installing on ${REMOTE}..."
-ssh "$REMOTE" "APP_DIR='$APP_DIR' SRC_DIR='$SRC_DIR' SERVICE_NAME='$SERVICE_NAME' OLD_SERVICE_NAMES='$OLD_SERVICE_NAMES' OLD_APP_DIRS='$OLD_APP_DIRS' ROTATE_ADMIN_CREDENTIALS='$ROTATE_ADMIN_CREDENTIALS' bash -s" <<'REMOTE_SCRIPT'
+ssh "$REMOTE" "APP_DIR='$APP_DIR' SRC_DIR='$SRC_DIR' SERVICE_NAME='$SERVICE_NAME' ROTATE_ADMIN_CREDENTIALS='$ROTATE_ADMIN_CREDENTIALS' bash -s" <<'REMOTE_SCRIPT'
 set -euo pipefail
 
 if [[ "$(id -u)" == "0" ]]; then
@@ -103,27 +109,11 @@ configure_cargo_mirror
 
 $SUDO rm -rf "$SRC_DIR"
 $SUDO mkdir -p "$SRC_DIR" "$APP_DIR"
-$SUDO tar -xzf /tmp/mjy-voice-shop-rs-source.tar.gz -C "$SRC_DIR"
+$SUDO chown "$(id -u):$(id -g)" "$SRC_DIR"
+tar -xzf /tmp/mjy-voice-shop-rs-source.tar.gz -C "$SRC_DIR"
 
 cd "$SRC_DIR"
 cargo build --release
-
-for svc in $OLD_SERVICE_NAMES; do
-  [[ "$svc" == *.service ]] || svc="${svc}.service"
-  if service_exists "$svc"; then
-    echo "Disabling old MCP service: $svc"
-    $SUDO systemctl stop "$svc" || true
-    $SUDO systemctl disable "$svc" || true
-  fi
-done
-
-for old_dir in $OLD_APP_DIRS; do
-  if [[ -d "$old_dir" ]]; then
-    archived="${old_dir}.disabled-${timestamp}"
-    echo "Archiving old MCP directory: $old_dir -> $archived"
-    $SUDO mv "$old_dir" "$archived"
-  fi
-done
 
 deployment_started=0
 rollback_on_error() {
@@ -204,15 +194,23 @@ if [[ "$ROTATE_ADMIN_CREDENTIALS" == "1" ]] || ! $SUDO grep -q '^ADMIN_PASSWORD_
 fi
 $SUDO chmod 0600 "${APP_DIR}/.env"
 
-$SUDO install -m 0644 "${SRC_DIR}/deploy/mjy-voice-shop-rs.service" "/etc/systemd/system/${SERVICE_NAME}"
+port="$(awk -F= '/^PORT=/{print $2}' "${APP_DIR}/.env" 2>/dev/null | tail -n 1 | tr -d '"' || true)"
+port="${port:-8787}"
+if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+  echo "Invalid PORT in ${APP_DIR}/.env: ${port}" >&2
+  exit 2
+fi
+rendered_service="${TMP_DIR:-/tmp}/mjy-voice-shop-rs.service"
+app_dir_sed="$(printf '%s' "$APP_DIR" | sed 's/[\\&|]/\\&/g')"
+sed -e "s|@@APP_DIR@@|${app_dir_sed}|g" -e "s|@@PORT@@|${port}|g" \
+  "${SRC_DIR}/deploy/mjy-voice-shop-rs.service" >"$rendered_service"
+$SUDO install -m 0644 "$rendered_service" "/etc/systemd/system/${SERVICE_NAME}"
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable --now "$SERVICE_NAME"
 
 sleep 1
 $SUDO systemctl --no-pager --full status "$SERVICE_NAME" | sed -n '1,18p'
 
-port="$(awk -F= '/^PORT=/{print $2}' "${APP_DIR}/.env" 2>/dev/null | tail -n 1 | tr -d '"' || true)"
-port="${port:-8787}"
 curl -fsS "http://127.0.0.1:${port}/api/health"
 echo
 deployment_started=0
