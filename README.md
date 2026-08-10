@@ -144,12 +144,16 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ## 部署
 
-`mjy-voice-shop-rs/deploy/` 提供示例配置：
+完整的首次部署、日常发布、Nginx/systemd 配置、验收、回滚和凭据轮换步骤见 [`mjy-voice-shop-rs/docs/部署说明.md`](mjy-voice-shop-rs/docs/部署说明.md)。
 
-- `mjy-voice-shop-rs.service`：systemd 服务单元
-- `mjy-voice-shop-nginx.locations.conf`：Nginx 反向代理 location
+日常发布入口：
 
-部署流程通常为：构建 `target/release/mjy-voice-shop-rs`、准备独立 `.env` 和 SQLite 数据目录、配置 Nginx TLS，再启动 systemd 服务。部署脚本 `scripts/deploy-jd.sh` 仅作为目标环境示例，执行前请审阅路径、用户和凭据策略。
+```bash
+cd mjy-voice-shop-rs
+REMOTE=root@jd ROTATE_ADMIN_CREDENTIALS=0 bash scripts/deploy-jd.sh
+```
+
+发布脚本会在远端构建 release 二进制、备份旧版本和 SQLite、安装 systemd 服务并执行本机健康检查；它不会上传 `.env`，也不会替你配置 Nginx TLS 和防火墙。
 
 ## 安全约定
 
