@@ -5005,7 +5005,7 @@ async fn submit_order(
             }),
         )
         .await;
-        return create_local_mock_order(state, conversation_id, context, items).await;
+        return create_local_mock_order(state, conversation_id, context, &items).await;
     }
     let base_client =
         OrderMcpClient::new(config.order_mcp_url.clone(), config.order_mcp_token.clone());
@@ -5043,18 +5043,34 @@ async fn submit_order(
             &state.pool,
             conversation_id,
             "order-api",
-            "order_create_fallback",
+            "order_create_failed",
             &json!({
                 "stage": "authorize_member",
                 "reason": authorize_result,
-                "fallback": "local_mock_order"
+                "fallback": "disabled_when_mcp_enabled"
             }),
         )
         .await;
-        return create_local_mock_order(state, conversation_id, context, items).await;
+        return authorize_result;
     }
+    let items = match enrich_mcp_product_matches(&client, &config, &context, conversation_id, items)
+        .await
+    {
+        Ok(items) => items,
+        Err(error) => {
+            db::log_event(
+                &state.pool,
+                conversation_id,
+                "order-api",
+                "order_product_resolution_failed",
+                &error,
+            )
+            .await;
+            return error;
+        }
+    };
     let preview_tool = order_mcp_tool_name(&config, "preview_order", "previewOrder");
-    let create_arguments = build_create_order_arguments(&context, items);
+    let create_arguments = build_create_order_arguments(&context, &items);
     let preview_arguments = build_preview_order_arguments(&create_arguments);
     db::log_event(
         &state.pool,
@@ -5085,15 +5101,15 @@ async fn submit_order(
             &state.pool,
             conversation_id,
             "order-api",
-            "order_create_fallback",
+            "order_create_failed",
             &json!({
                 "stage": "preview_order",
                 "reason": preview_result,
-                "fallback": "local_mock_order"
+                "fallback": "disabled_when_mcp_enabled"
             }),
         )
         .await;
-        return create_local_mock_order(state, conversation_id, context, items).await;
+        return preview_result;
     }
     let tool_name = order_mcp_tool_name(&config, "create_order", "createOrder");
     db::log_event(
@@ -5116,16 +5132,16 @@ async fn submit_order(
             &state.pool,
             conversation_id,
             "order-api",
-            "order_create_fallback",
+            "order_create_failed",
             &json!({
                 "reason": result,
-                "fallback": "local_mock_order"
+                "fallback": "disabled_when_mcp_enabled"
             }),
         )
         .await;
-        return create_local_mock_order(state, conversation_id, context, items).await;
+        return result;
     }
-    persist_order_mcp_result(state, conversation_id, context, items, result).await
+    persist_order_mcp_result(state, conversation_id, context, &items, result).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -5335,17 +5351,14 @@ async fn refund_submitted_order(
             &state.pool,
             conversation_id,
             "order-api",
-            "order_refund_fallback",
+            "order_refund_failed",
             &json!({
                 "reason": result,
-                "fallback": "local_mock_refund"
+                "fallback": "disabled_when_mcp_enabled"
             }),
         )
         .await;
-        return match refund_local_mock_order(state, sale_order_id, reason).await {
-            Ok(value) => value,
-            Err(error) => order_error("ORDER_REFUND_FAILED", &error.message),
-        };
+        return result;
     }
     result
 }
@@ -5457,6 +5470,28 @@ fn build_preview_order_arguments(create_arguments: &Value) -> Value {
 }
 
 fn product_match_to_mcp_line(item: &ProductMatch) -> Value {
+    if let (Some(product_id), Some(sku_code)) = (item.mcp_product_id, item.mcp_sku_code.as_deref())
+    {
+        return json!({
+            "productId": product_id,
+            "skuCode": sku_code,
+            "amount": item.quantity
+        });
+    }
+    if let (Some(parent_goods_gid), Some(parent_goods_no), Some(goods_gid), Some(goods_no)) = (
+        item.parent_goods_gid,
+        item.parent_goods_no.as_deref(),
+        item.goods_gid,
+        item.goods_no.as_deref(),
+    ) {
+        return json!({
+            "parentGoodsGid": parent_goods_gid,
+            "parentGoodsNo": parent_goods_no,
+            "goodsGid": goods_gid,
+            "goodsNo": goods_no,
+            "amount": item.quantity
+        });
+    }
     let (product_id, sku_code) = match item.product_id.as_str() {
         "cola-500" => (16513, "SP11392-500ML"),
         "water-555" => (20002, "SP20002-555ML"),
@@ -5471,6 +5506,88 @@ fn product_match_to_mcp_line(item: &ProductMatch) -> Value {
         "skuCode": sku_code,
         "amount": item.quantity
     })
+}
+
+async fn enrich_mcp_product_matches(
+    client: &OrderMcpClient,
+    config: &AppConfig,
+    context: &Value,
+    conversation_id: &str,
+    items: &[ProductMatch],
+) -> Result<Vec<ProductMatch>, Value> {
+    let tool_name = order_mcp_tool_name(config, "search_product", "searchProductForMcp");
+    let dept_id = context
+        .get("deptId")
+        .and_then(value_as_i64)
+        .or_else(|| context.get("storeId").and_then(value_as_i64))
+        .unwrap_or_default();
+    let delivery = context
+        .get("delivery")
+        .and_then(Value::as_str)
+        .unwrap_or("pick");
+    let mut enriched = Vec::with_capacity(items.len());
+    for item in items {
+        let result = client
+            .call_tool(
+                &tool_name,
+                json!({
+                    "deptId": dept_id,
+                    "query": item.name,
+                    "delivery": delivery,
+                    "chatId": conversation_id
+                }),
+            )
+            .await;
+        if !mcp_tool_succeeded(&result) {
+            return Err(order_error(
+                "ORDER_PRODUCT_RESOLUTION_FAILED",
+                result
+                    .get("message")
+                    .or_else(|| result.get("msg"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("商品搜索失败"),
+            ));
+        }
+        let candidates = result
+            .get("data")
+            .and_then(Value::as_array)
+            .or_else(|| result.pointer("/data/items").and_then(Value::as_array))
+            .cloned()
+            .unwrap_or_default();
+        let Some(candidate) = candidates.first() else {
+            // Older customer MCP deployments may expose the order tools but
+            // not the product-search tool yet. Preserve the existing product
+            // mapping in that compatibility case; the subsequent preview or
+            // create call remains the source of truth for success/failure.
+            if extract_mcp_order_id(&result).is_some() {
+                enriched.push(item.clone());
+                continue;
+            }
+            return Err(order_error(
+                "ORDER_PRODUCT_NOT_FOUND",
+                &format!("未找到商品：{}", item.name),
+            ));
+        };
+        let product_id = candidate
+            .get("productId")
+            .and_then(value_as_i64)
+            .ok_or_else(|| order_error("ORDER_PRODUCT_BAD_RESPONSE", "商品结果缺少 productId"))?;
+        let sku_code = candidate
+            .get("skuCode")
+            .and_then(Value::as_str)
+            .filter(|v| !v.trim().is_empty())
+            .ok_or_else(|| order_error("ORDER_PRODUCT_BAD_RESPONSE", "商品结果缺少 skuCode"))?;
+        let mut item = item.clone();
+        item.mcp_product_id = Some(product_id);
+        item.mcp_sku_code = Some(sku_code.to_string());
+        item.unit_price = candidate
+            .get("estimatePrice")
+            .or_else(|| candidate.get("initialPrice"))
+            .and_then(Value::as_f64)
+            .unwrap_or(item.unit_price);
+        enriched.push(item);
+    }
+    Ok(enriched)
 }
 
 fn value_as_i64(value: &Value) -> Option<i64> {
@@ -5494,7 +5611,7 @@ fn mcp_tool_succeeded(value: &Value) -> bool {
         return false;
     }
     if let Some(code) = value.get("code") {
-        if code.as_i64().is_some_and(|code| code != 0) {
+        if code.as_i64().is_some_and(|code| code != 0 && code != 200) {
             return false;
         }
         if code
@@ -5550,7 +5667,9 @@ async fn persist_order_mcp_result(
 fn extract_mcp_order_id(value: &Value) -> Option<String> {
     for pointer in [
         "/data/orderId",
+        "/data/id",
         "/orderId",
+        "/id",
         "/saleOrderId",
         "/data/saleOrderId",
     ] {

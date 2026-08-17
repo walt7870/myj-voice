@@ -35,6 +35,18 @@ pub struct ProductMatch {
     pub quantity: u32,
     pub unit_price: f64,
     pub confidence: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_goods_gid: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_goods_no: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goods_gid: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goods_no: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_product_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_sku_code: Option<String>,
 }
 
 pub fn match_products(text: &str, products: &[Product]) -> Vec<ProductMatch> {
@@ -61,6 +73,12 @@ pub fn match_products(text: &str, products: &[Product]) -> Vec<ProductMatch> {
             quantity: quantity_before(text, name).unwrap_or(1),
             unit_price: product.price,
             confidence: 0.86,
+            parent_goods_gid: None,
+            parent_goods_no: None,
+            goods_gid: None,
+            goods_no: None,
+            mcp_product_id: None,
+            mcp_sku_code: None,
         });
     }
     matches

@@ -168,7 +168,7 @@ impl AppConfig {
 }
 
 fn default_order_mcp_url() -> String {
-    "http://127.0.0.1:8765/mcp".to_string()
+    "https://mcptest.becococafe.com/mcp".to_string()
 }
 
 fn default_order_mcp_enabled() -> bool {
@@ -185,16 +185,23 @@ pub fn order_mcp_enabled_from_env_value(value: Option<&str>) -> bool {
 pub fn default_order_context() -> Value {
     json!({
         "deviceId": "DOLL-0001",
-        "deptId": 999006940,
-        "storeId": "999006940",
-        "storeName": "美宜佳科技园店",
-        "memberId": "demo-member",
+        "deptId": 57,
+        "storeId": "57",
+        "storeName": "待客户提供门店名称",
+        "storeNo": "BCC000042",
+        "storeNumber": "BCC000042",
+        "companyCode": "CC",
+        "appId": "待客户提供应用 AppId",
+        "appVersion": "1.0",
+        "srcChannel": 1,
+        "memberId": "3a224c9c-5652-92e1-8610-920b228febb3",
+        "userId": "3a224c9c-5652-92e1-8610-920b228febb3",
         "operatorId": "voice-shop-demo",
         "longitude": 113.9419,
         "latitude": 22.5431,
         "delivery": "pick",
-        "xUserId": "2088602924355011",
-        "xUserPhone": "13912345678"
+        "xUserId": "3a224c9c-5652-92e1-8610-920b228febb3",
+        "xLtAuth": "待客户提供x-lt-auth加密值"
     })
 }
 
@@ -202,6 +209,10 @@ pub fn default_order_mcp_tools() -> Value {
     json!({
         "resolve_context": "resolveUserContext",
         "authorize_member": "authorizeMember",
+        "query_shop_list": "queryShopList",
+        "search_product": "searchProductForMcp",
+        "query_product_detail": "queryProductDetailInfo",
+        "switch_product": "switchProduct",
         "preview_order": "previewOrder",
         "create_order": "createOrder",
         "list_orders": "listUserOrders",
