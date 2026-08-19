@@ -16,7 +16,10 @@ use futures_util::{SinkExt, StreamExt};
 use mjy_voice_shop_rs::{
     admin_auth::{hash_password, AdminConfig},
     db,
-    domain::device_auth::{issue_device_token, secret_hash},
+    domain::{
+        device_auth::{issue_device_token, secret_hash},
+        matching::Product,
+    },
     web::{router as production_router, AppState},
 };
 use serde_json::{json, Value};
@@ -55,6 +58,41 @@ fn router(state: AppState) -> Router {
         [127, 0, 0, 1],
         0,
     )))))
+}
+
+#[tokio::test]
+async fn mcp_catalog_sync_replaces_legacy_mock_products_and_keeps_manual_products() {
+    let state = test_state().await;
+    db::upsert_product(
+        &state.pool,
+        &Product {
+            id: "manual-snack".to_string(),
+            name: "手工维护商品".to_string(),
+            aliases: vec!["手工商品".to_string()],
+            spec: "件".to_string(),
+            price: 9.9,
+        },
+    )
+    .await
+    .unwrap();
+    let removed = db::replace_mcp_catalog_products(
+        &state.pool,
+        &[Product {
+            id: "mcp-latte".to_string(),
+            name: "拿铁".to_string(),
+            aliases: vec!["拿铁".to_string()],
+            spec: "冷".to_string(),
+            price: 24.0,
+        }],
+    )
+    .await
+    .unwrap();
+
+    let products = db::list_products(&state.pool).await.unwrap();
+    assert_eq!(removed, 3);
+    assert!(products.iter().any(|product| product.id == "mcp-latte"));
+    assert!(products.iter().any(|product| product.id == "manual-snack"));
+    assert!(!products.iter().any(|product| product.id == "cola-500"));
 }
 
 #[tokio::test]
@@ -255,15 +293,19 @@ async fn admin_config_masks_secrets_and_exposes_default_model() {
 
     assert_eq!(body["app_id"], "048c5dc4");
     assert_eq!(body["llm_model"], "xopdeepseekv4flash");
-    assert_eq!(body["order_context"]["storeId"], "999006940");
-    assert_eq!(body["order_context"]["deptId"], 999006940);
-    assert_eq!(body["order_context"]["xUserId"], "2088602924355011");
+    assert_eq!(body["order_context"]["storeId"], "57");
+    assert_eq!(body["order_context"]["deptId"], 57);
+    assert_eq!(
+        body["order_context"]["xUserId"],
+        "3a224c9c-5652-92e1-8610-920b228febb3"
+    );
     assert!(body["available_models"]
         .as_array()
         .unwrap()
         .iter()
         .any(|m| m == "xopdsv32exp"));
     assert!(body.get("api_secret").is_none());
+    assert!(body.get("mjy_open_api").is_none());
 }
 
 #[tokio::test]
@@ -2347,6 +2389,11 @@ async fn internal_management_routes_reject_public_proxy_identity_without_leaking
         (
             reqwest::Method::POST,
             "/api/admin/products",
+            Some(serde_json::json!({})),
+        ),
+        (
+            reqwest::Method::POST,
+            "/api/admin/products/sync",
             Some(serde_json::json!({})),
         ),
         (

@@ -44,14 +44,17 @@
               <h2>商品管理</h2>
               <p>别名支持用斜杠、逗号或中文逗号分隔，例如：可乐 / 可口 / 汽水。</p>
             </div>
-            <button id="adminAddProduct" type="button">新增商品</button>
+            <div class="page-hero-actions">
+              <button id="adminSyncProducts" type="button">从 MCP 同步商品</button>
+              <button id="adminAddProduct" type="button">新增商品</button>
+            </div>
           </section>
 
           <section class="admin-panel">
             <div class="section-head">
               <h2>商品列表</h2>
               <div class="section-meta">
-                <span>体验页会用这里的商品库做确定性匹配</span>
+                <span>同步会覆盖旧演示商品，手工新增商品会保留</span>
                 <b id="adminStatus">商品库加载中</b>
               </div>
             </div>
@@ -191,6 +194,6 @@
 
     <script src="admin-time.js?v=20260730-admin-data"></script>
     <script src="admin-auth.js?v=20260730-admin-data"></script>
-    <script src="admin.js?v=20260730-admin-data"></script>
+    <script src="admin.js?v=20260818-catalog-sync"></script>
   </body>
 </html>

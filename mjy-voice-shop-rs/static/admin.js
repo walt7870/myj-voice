@@ -813,14 +813,34 @@ async function refundAdminOrder(orderId) {
 
 async function loadAdminProducts() {
   adminState.products = await fetchInternalJson("/api/admin/products");
+  renderAdminProducts();
+  setText("adminStatus", "商品库已加载");
+}
+
+function renderAdminProducts() {
   setText("dashboardProducts", String(adminState.products.length));
   const container = $("adminProducts");
   if (!container) return;
   container.innerHTML = adminState.products.map(renderProductRow).join("");
-  setText("adminStatus", "商品库已加载");
   document.querySelectorAll("[data-save-product]").forEach((button) => {
     button.addEventListener("click", () => runAdminTask(() => saveProduct(button.dataset.saveProduct)));
   });
+}
+
+async function syncAdminProducts() {
+  if (!window.confirm("将从当前 MCP 门店同步商品，并清理此前的演示商品。确定继续吗？")) return;
+  setText("adminStatus", "正在从 MCP 同步商品");
+  const result = await fetchInternalJson("/api/admin/products/sync", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  adminState.products = result.products || [];
+  renderAdminProducts();
+  setText(
+    "adminStatus",
+    `已同步 ${result.synced || 0} 个实际商品，清理 ${result.removed_legacy || 0} 个演示商品`,
+  );
 }
 
 function renderProductRow(product) {
@@ -1217,6 +1237,8 @@ function bindAdminEvents() {
   });
   const addButton = $("adminAddProduct");
   if (addButton) addButton.addEventListener("click", () => runAdminTask(addProduct));
+  const syncProductsButton = $("adminSyncProducts");
+  if (syncProductsButton) syncProductsButton.addEventListener("click", () => runAdminTask(syncAdminProducts));
   const conversationPrev = $("conversationPrev");
   const conversationNext = $("conversationNext");
   if (conversationPrev) {

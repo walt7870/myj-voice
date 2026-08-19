@@ -88,12 +88,14 @@ pub async fn init(pool: &SqlitePool) -> Result<()> {
             aliases TEXT NOT NULL,
             spec TEXT NOT NULL,
             price REAL NOT NULL,
-            enabled INTEGER NOT NULL DEFAULT 1
+            enabled INTEGER NOT NULL DEFAULT 1,
+            source TEXT NOT NULL DEFAULT 'legacy'
         );
         "#,
     )
     .execute(pool)
     .await?;
+    ensure_product_source_column(pool).await?;
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS devices (
@@ -220,16 +222,64 @@ pub async fn list_products(pool: &SqlitePool) -> Result<Vec<Product>> {
 }
 
 pub async fn upsert_product(pool: &SqlitePool, product: &Product) -> Result<()> {
+    upsert_product_with_source(pool, product, "manual").await
+}
+
+async fn upsert_product_with_source(
+    pool: &SqlitePool,
+    product: &Product,
+    source: &str,
+) -> Result<()> {
     sqlx::query(
-        "INSERT OR REPLACE INTO products(id, name, aliases, spec, price, enabled) VALUES(?, ?, ?, ?, ?, 1)",
+        "INSERT OR REPLACE INTO products(id, name, aliases, spec, price, enabled, source) VALUES(?, ?, ?, ?, ?, 1, ?)",
     )
     .bind(&product.id)
     .bind(&product.name)
     .bind(serde_json::to_string(&product.aliases)?)
     .bind(&product.spec)
     .bind(product.price)
+    .bind(source)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// Replaces the product catalog imported from the customer MCP while removing
+/// only old mock/legacy rows. Manually maintained products stay untouched.
+pub async fn replace_mcp_catalog_products(pool: &SqlitePool, products: &[Product]) -> Result<u64> {
+    let mut transaction = pool.begin().await?;
+    for product in products {
+        sqlx::query(
+            "INSERT OR REPLACE INTO products(id, name, aliases, spec, price, enabled, source) VALUES(?, ?, ?, ?, ?, 1, 'mcp')",
+        )
+        .bind(&product.id)
+        .bind(&product.name)
+        .bind(serde_json::to_string(&product.aliases)?)
+        .bind(&product.spec)
+        .bind(product.price)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    let removed = sqlx::query("DELETE FROM products WHERE source IN ('legacy', 'mock')")
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+    transaction.commit().await?;
+    Ok(removed)
+}
+
+async fn ensure_product_source_column(pool: &SqlitePool) -> Result<()> {
+    let rows = sqlx::query("PRAGMA table_info(products)")
+        .fetch_all(pool)
+        .await?;
+    let has_source = rows
+        .iter()
+        .any(|row| row.get::<String, _>("name") == "source");
+    if !has_source {
+        sqlx::query("ALTER TABLE products ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy'")
+            .execute(pool)
+            .await?;
+    }
     Ok(())
 }
 
@@ -640,20 +690,22 @@ async fn seed_products(pool: &SqlitePool) -> Result<()> {
         .fetch_one(pool)
         .await?
         .get("c");
-    if count == 0 {
-        for product in [
-            Product::new("cola-500", "可口可乐", vec!["可乐", "可口"], "500ml", 3.5),
-            Product::new(
-                "water-555",
-                "怡宝矿泉水",
-                vec!["水", "矿泉水", "怡宝"],
-                "555ml",
-                2.0,
-            ),
-            Product::new("milk-250", "纯牛奶", vec!["牛奶", "奶"], "250ml", 4.5),
-        ] {
-            upsert_product(pool, &product).await?;
-        }
+    if count > 0 {
+        return Ok(());
+    }
+    let products = vec![
+        Product::new("cola-500", "可口可乐", vec!["可乐", "可口"], "500ml", 3.5),
+        Product::new(
+            "water-555",
+            "怡宝矿泉水",
+            vec!["水", "矿泉水", "怡宝"],
+            "555ml",
+            2.0,
+        ),
+        Product::new("milk-250", "纯牛奶", vec!["牛奶", "奶"], "250ml", 4.5),
+    ];
+    for product in products {
+        upsert_product_with_source(pool, &product, "mock").await?;
     }
     Ok(())
 }

@@ -39,7 +39,82 @@ pub struct AppConfig {
     pub order_context: Value,
     #[serde(default = "default_order_mcp_tools")]
     pub order_mcp_tools: Value,
+    /// Kept only in the process environment so the admin config endpoint and
+    /// SQLite configuration payload never expose the Open API credentials.
+    #[serde(skip_serializing, default)]
+    pub mjy_open_api: MjyOpenApiConfig,
     pub mock_providers: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MjyOpenApiConfig {
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub app_id: String,
+    #[serde(default)]
+    pub app_secret: String,
+    #[serde(default)]
+    pub aes_gcm_key: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub app_version: String,
+    #[serde(default)]
+    pub company: String,
+    #[serde(default)]
+    pub store_id: String,
+    #[serde(default)]
+    pub store_no: String,
+    #[serde(default)]
+    pub source_channel: String,
+    #[serde(default)]
+    pub company_code: String,
+    #[serde(default)]
+    pub debug: String,
+    #[serde(default)]
+    pub member_id: String,
+    #[serde(default)]
+    pub mcp_source: String,
+}
+
+impl MjyOpenApiConfig {
+    pub fn from_env() -> Self {
+        Self {
+            base_url: env_or("MJY_OPEN_API_BASE_URL", "https://open-api-test.myj.com.cn"),
+            app_id: env_or("MJY_OPEN_API_APP_ID", ""),
+            app_secret: env_or("MJY_OPEN_API_APP_SECRET", ""),
+            aes_gcm_key: env_or("MJY_OPEN_API_AES_GCM_KEY", ""),
+            version: env_or("MJY_OPEN_API_VERSION", "1.0"),
+            app_version: env_or("MJY_OPEN_API_APP_VERSION", "1.0"),
+            company: env_or("MJY_OPEN_API_COMPANY", "GD"),
+            store_id: env_or("MJY_OPEN_API_STORE_ID", "57"),
+            store_no: env_or("MJY_OPEN_API_STORE_NO", "BCC000042"),
+            source_channel: env_or("MJY_OPEN_API_SOURCE_CHANNEL", "1"),
+            company_code: env_or("MJY_OPEN_API_COMPANY_CODE", "CC"),
+            debug: env_or("MJY_OPEN_API_DEBUG", "1"),
+            member_id: env_or("MJY_OPEN_API_MEMBER_ID", ""),
+            mcp_source: env_or("MJY_MCP_SOURCE", "6"),
+        }
+    }
+
+    pub fn is_configured(&self) -> bool {
+        [
+            &self.app_id,
+            &self.app_secret,
+            &self.aes_gcm_key,
+            &self.member_id,
+            &self.mcp_source,
+        ]
+        .into_iter()
+        .all(|value| !value.trim().is_empty())
+    }
+}
+
+impl Default for MjyOpenApiConfig {
+    fn default() -> Self {
+        Self::from_env()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +192,7 @@ impl AppConfig {
             order_mcp_token: std::env::var("MCP_HTTP_TOKEN").unwrap_or_default(),
             order_context: default_order_context(),
             order_mcp_tools: default_order_mcp_tools(),
+            mjy_open_api: MjyOpenApiConfig::from_env(),
             mock_providers: mock_providers_from_env_value(std::env::var("MOCK_PROVIDERS").ok().as_deref()),
         }
     }
@@ -168,11 +244,15 @@ impl AppConfig {
 }
 
 fn default_order_mcp_url() -> String {
-    "http://127.0.0.1:8765/mcp".to_string()
+    "https://mcptest.becococafe.com/mcp".to_string()
 }
 
 fn default_order_mcp_enabled() -> bool {
     false
+}
+
+fn env_or(name: &str, default: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| default.to_string())
 }
 
 pub fn order_mcp_enabled_from_env_value(value: Option<&str>) -> bool {
@@ -185,16 +265,23 @@ pub fn order_mcp_enabled_from_env_value(value: Option<&str>) -> bool {
 pub fn default_order_context() -> Value {
     json!({
         "deviceId": "DOLL-0001",
-        "deptId": 999006940,
-        "storeId": "999006940",
-        "storeName": "美宜佳科技园店",
-        "memberId": "demo-member",
+        "deptId": 57,
+        "storeId": "57",
+        "storeName": "待客户提供门店名称",
+        "storeNo": "BCC000042",
+        "storeNumber": "BCC000042",
+        "companyCode": "CC",
+        "appId": "待客户提供应用 AppId",
+        "appVersion": "1.0",
+        "srcChannel": 1,
+        "memberId": "3a224c9c-5652-92e1-8610-920b228febb3",
+        "userId": "3a224c9c-5652-92e1-8610-920b228febb3",
         "operatorId": "voice-shop-demo",
         "longitude": 113.9419,
         "latitude": 22.5431,
         "delivery": "pick",
-        "xUserId": "2088602924355011",
-        "xUserPhone": "13912345678"
+        "xUserId": "3a224c9c-5652-92e1-8610-920b228febb3",
+        "xLtAuth": "待客户提供x-lt-auth加密值"
     })
 }
 
@@ -202,6 +289,10 @@ pub fn default_order_mcp_tools() -> Value {
     json!({
         "resolve_context": "resolveUserContext",
         "authorize_member": "authorizeMember",
+        "query_shop_list": "queryShopList",
+        "search_product": "searchProductForMcp",
+        "query_product_detail": "queryProductDetailInfo",
+        "switch_product": "switchProduct",
         "preview_order": "previewOrder",
         "create_order": "createOrder",
         "list_orders": "listUserOrders",

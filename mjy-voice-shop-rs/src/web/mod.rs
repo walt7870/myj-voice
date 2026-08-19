@@ -93,6 +93,7 @@ pub fn router(state: AppState) -> Router {
         .merge(admin::routes())
         .route("/api/admin/config", get(get_config).put(update_config))
         .route("/api/admin/products", get(list_products).post(save_product))
+        .route("/api/admin/products/sync", post(sync_products_from_mcp))
         .route("/api/admin/products/{id}", put(save_product_with_id))
         .route("/api/admin/conversations", get(list_conversations))
         .route(
@@ -311,6 +312,63 @@ async fn save_product_with_id(
     product.id = id;
     db::upsert_product(&state.pool, &product).await?;
     Ok(Json(product))
+}
+
+async fn sync_products_from_mcp(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let config = db::get_config(&state.pool).await?;
+    if !config.order_mcp_enabled {
+        return Err(ApiError::bad_request("请先启用订单 MCP 后再同步实际商品"));
+    }
+    let trace_id = format!("mjy-catalog-sync-{}", Uuid::new_v4());
+    let base_client =
+        OrderMcpClient::new(config.order_mcp_url.clone(), config.order_mcp_token.clone())
+            .with_trace_id(trace_id.clone());
+    let context =
+        resolve_order_context(&base_client, &config, &default_device_id(), Value::Null).await;
+    let client = build_order_mcp_client(&config, &context)
+        .await
+        .map_err(|error| ApiError::bad_request(mcp_result_message(&error)))?
+        .with_trace_id(trace_id.clone());
+    let dept_id = context
+        .get("deptId")
+        .and_then(value_as_i64)
+        .or_else(|| context.get("storeId").and_then(value_as_i64))
+        .ok_or_else(|| ApiError::bad_request("商品同步缺少门店 ID"))?;
+    let delivery = context
+        .get("delivery")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("pick");
+    let tool_name = order_mcp_tool_name(&config, "search_product", "searchProductForMcp");
+    let result = client
+        .call_tool(
+            &tool_name,
+            json!({
+                "deptId": dept_id,
+                "query": "",
+                "delivery": delivery,
+                "chatId": format!("catalog-sync-{}", Uuid::new_v4())
+            }),
+        )
+        .await;
+    if !mcp_tool_succeeded(&result) {
+        return Err(ApiError::bad_request(mcp_result_message(&result)));
+    }
+    let imported_products = mcp_catalog_products(&result).map_err(ApiError::bad_request)?;
+    if imported_products.is_empty() {
+        return Err(ApiError::bad_request(
+            "商品接口未返回可同步商品，未清理本地商品库",
+        ));
+    }
+    let imported_count = imported_products.len();
+    let removed_legacy = db::replace_mcp_catalog_products(&state.pool, &imported_products).await?;
+    let products = db::list_products(&state.pool).await?;
+    Ok(Json(json!({
+        "ok": true,
+        "synced": imported_count,
+        "removed_legacy": removed_legacy,
+        "products": products
+    })))
 }
 
 async fn new_conversation(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -2219,11 +2277,13 @@ where
     let turn_for_analysis = turn_id.to_string();
     let latest_text_for_analysis = user_text.to_string();
     let round_text_for_reply = prepared.round_text.clone();
+    let trace_id_for_analysis = trace.as_ref().and_then(|trace| trace.trace_id.clone());
     let analysis = tokio::spawn(async move {
         analyze_turn(
             &state_for_analysis,
             &conversation_for_analysis,
             &turn_for_analysis,
+            trace_id_for_analysis,
             &latest_text_for_analysis,
             &prepared.round_text,
         )
@@ -3308,6 +3368,7 @@ async fn analyze_turn(
     state: &AppState,
     conversation_id: &str,
     turn_id: &str,
+    trace_id: Option<String>,
     latest_user_text: &str,
     round_user_text: &str,
 ) -> Result<Vec<StreamEvent>, ApiError> {
@@ -3375,14 +3436,20 @@ async fn analyze_turn(
                 &order.order_id,
                 Some(latest_user_text.to_string()),
                 Some(turn_id.to_string()),
+                trace_id.as_deref(),
             )
             .await;
-            if result.get("ok").and_then(Value::as_bool) == Some(false) {
+            if !mcp_tool_succeeded(&result) {
                 let message = result
                     .get("message")
+                    .or_else(|| result.get("msg"))
                     .and_then(Value::as_str)
                     .unwrap_or("退单接口调用失败");
-                events.push(StreamEvent::error("order_refund_failed", message));
+                let mut event = StreamEvent::error("order_refund_failed", message);
+                if let Some(trace_id) = result.get("traceId") {
+                    event.payload["traceId"] = trace_id.clone();
+                }
+                events.push(event);
             } else {
                 events.push(StreamEvent::new("order_refunded", result));
                 events.push(StreamEvent::new(
@@ -3417,14 +3484,20 @@ async fn analyze_turn(
             &default_device_id(),
             Value::Null,
             &matches,
+            trace_id.as_deref(),
         )
         .await;
-        if result.get("ok").and_then(Value::as_bool) == Some(false) {
+        if !mcp_tool_succeeded(&result) {
             let message = result
                 .get("message")
+                .or_else(|| result.get("msg"))
                 .and_then(Value::as_str)
                 .unwrap_or("订单接口调用失败");
-            events.push(StreamEvent::error("order_failed", message));
+            let mut event = StreamEvent::error("order_failed", message);
+            if let Some(trace_id) = result.get("traceId") {
+                event.payload["traceId"] = trace_id.clone();
+            }
+            events.push(event);
         } else {
             events.push(StreamEvent::new("order_created", result));
         }
@@ -3707,7 +3780,7 @@ async fn order_context_prompt(
         let order_id = order_id_from_payload(&order.payload).unwrap_or(order.order_id.clone());
         if is_explicit_order_refund_intent(latest_user_text) {
             return Ok(Some(format!(
-                "本轮订单已经下发，订单号：{}。用户正在明确要求退单、退款或取消订单。请只用一句简短话术告知已为用户处理退单/取消，本轮对话结束；不要再次询问是否下单。",
+                "本轮已有订单，订单号：{}。系统正在调用退单接口，结果尚未返回。请不要提前声称退单已成功，只用一句简短话术告知正在处理，最终结果以订单状态和系统事件为准。",
                 order_id
             )));
         }
@@ -3716,6 +3789,12 @@ async fn order_context_prompt(
     let products = db::list_products(&state.pool).await?;
     let matches = match_products(round_user_text, &products);
     if !matches.is_empty() {
+        if is_order_confirmation_intent(latest_user_text) {
+            return Ok(Some(format!(
+                "用户刚刚确认下单：{}。系统正在调用真实订单接口，结果尚未返回。请不要声称订单已经下发、不要编造订单号，只用一句简短话术告知正在处理，最终结果以订单状态和系统事件为准。",
+                summarize_order_items(&matches)
+            )));
+        }
         return Ok(Some(format!(
             "当前已经识别到待下发订单：{}。这是用户在本对话中新发起的订单，不要与之前已下发的订单合并。如果用户还没有明确确认下单，请用一句话播报这些商品和数量，并询问是否确认下发订单；不要承诺已经下单。",
             summarize_order_items(&matches)
@@ -3742,9 +3821,12 @@ fn summarize_order_items(items: &[ProductMatch]) -> String {
 fn mock_reply(config: &AppConfig, user_text: &str) -> String {
     let products = ["可乐", "水", "矿泉水", "牛奶"];
     if is_explicit_order_refund_intent(user_text) {
-        "好的，已为您处理退单，本轮对话结束。".to_string()
+        // The analysis task performs the real refund call concurrently with reply
+        // generation.  Keep the spoken acknowledgement pending until the event
+        // stream records whether the upstream operation actually succeeded.
+        "好的，已提交退单请求，结果以订单状态为准。".to_string()
     } else if is_order_confirmation_intent(user_text) {
-        "好的，收到确认，正在下发订单。".to_string()
+        "好的，收到确认，正在尝试下发订单，结果以订单状态为准。".to_string()
     } else if is_conversation_end_intent(user_text) {
         "好的，本轮交互结束。".to_string()
     } else if products.iter().any(|name| user_text.contains(name)) {
@@ -4939,9 +5021,10 @@ async fn confirm_order(
         &req.device_id,
         req.context,
         &req.items,
+        None,
     )
     .await;
-    let event_type = if result.get("ok").and_then(Value::as_bool) == Some(false) {
+    let event_type = if !mcp_tool_succeeded(&result) {
         "order_failed"
     } else {
         "order_created"
@@ -4963,6 +5046,7 @@ async fn submit_order(
     device_id: &str,
     context: Value,
     items: &[ProductMatch],
+    requested_trace_id: Option<&str>,
 ) -> Value {
     let config = match db::get_config(&state.pool).await {
         Ok(config) => config,
@@ -5005,23 +5089,31 @@ async fn submit_order(
             }),
         )
         .await;
-        return create_local_mock_order(state, conversation_id, context, items).await;
+        return create_local_mock_order(state, conversation_id, context, &items).await;
     }
+    let trace_id = requested_trace_id
+        .map(str::to_owned)
+        .filter(|trace_id| !trace_id.trim().is_empty())
+        .unwrap_or_else(|| format!("mjy-session-{}", conversation_id));
     let base_client =
-        OrderMcpClient::new(config.order_mcp_url.clone(), config.order_mcp_token.clone());
+        OrderMcpClient::new(config.order_mcp_url.clone(), config.order_mcp_token.clone())
+            .with_trace_id(trace_id.clone());
     let context = resolve_order_context(&base_client, &config, device_id, context).await;
-    let client = OrderMcpClient::new_with_context(
-        config.order_mcp_url.clone(),
-        config.order_mcp_token.clone(),
-        &context,
-    );
+    let client = match build_order_mcp_client(&config, &context)
+        .await
+        .map(|client| client.with_trace_id(trace_id))
+    {
+        Ok(client) => client,
+        Err(error) => return error,
+    };
+    let trace_id = client.trace_id().map(ToString::to_string);
     let authorize_tool = order_mcp_tool_name(&config, "authorize_member", "authorizeMember");
     db::log_event(
         &state.pool,
         conversation_id,
         "order-api",
         "order_mcp_authorize_call",
-        &json!({"tool": authorize_tool}),
+        &json!({"tool": authorize_tool, "traceId": trace_id}),
     )
     .await;
     let authorize_result = client.call_tool(&authorize_tool, json!({})).await;
@@ -5032,6 +5124,7 @@ async fn submit_order(
         "order_mcp_authorize_result",
         &json!({
             "tool": authorize_tool,
+            "traceId": trace_id,
             "success": mcp_tool_succeeded(&authorize_result),
             "code": authorize_result.get("code"),
             "message": authorize_result.get("message").or_else(|| authorize_result.get("msg"))
@@ -5043,25 +5136,43 @@ async fn submit_order(
             &state.pool,
             conversation_id,
             "order-api",
-            "order_create_fallback",
+            "order_create_failed",
             &json!({
                 "stage": "authorize_member",
+                "traceId": trace_id,
                 "reason": authorize_result,
-                "fallback": "local_mock_order"
+                "fallback": "disabled_when_mcp_enabled"
             }),
         )
         .await;
-        return create_local_mock_order(state, conversation_id, context, items).await;
+        return authorize_result;
     }
+    let items = match enrich_mcp_product_matches(&client, &config, &context, conversation_id, items)
+        .await
+    {
+        Ok(items) => items,
+        Err(error) => {
+            let error = with_trace_id(error, trace_id.as_deref());
+            db::log_event(
+                &state.pool,
+                conversation_id,
+                "order-api",
+                "order_product_resolution_failed",
+                &error,
+            )
+            .await;
+            return error;
+        }
+    };
     let preview_tool = order_mcp_tool_name(&config, "preview_order", "previewOrder");
-    let create_arguments = build_create_order_arguments(&context, items);
+    let mut create_arguments = build_create_order_arguments(&context, &items);
     let preview_arguments = build_preview_order_arguments(&create_arguments);
     db::log_event(
         &state.pool,
         conversation_id,
         "order-api",
         "order_mcp_preview_call",
-        &json!({"tool": preview_tool, "arguments": preview_arguments}),
+        &json!({"tool": preview_tool, "traceId": trace_id, "arguments": preview_arguments}),
     )
     .await;
     let preview_result = client.call_tool(&preview_tool, preview_arguments).await;
@@ -5072,11 +5183,14 @@ async fn submit_order(
         "order_mcp_preview_result",
         &json!({
             "tool": preview_tool,
+            "traceId": trace_id,
             "success": mcp_tool_succeeded(&preview_result),
             "code": preview_result.get("code"),
             "message": preview_result.get("message").or_else(|| preview_result.get("msg")),
             "aboutTime": preview_result.pointer("/data/aboutTime"),
-            "discountPrice": preview_result.pointer("/data/discountPrice")
+            "discountPrice": preview_result.pointer("/data/discountPrice"),
+            "privilegeMoney": preview_privilege_money(&preview_result),
+            "couponCodeList": preview_coupon_code_list(&preview_result)
         }),
     )
     .await;
@@ -5085,15 +5199,22 @@ async fn submit_order(
             &state.pool,
             conversation_id,
             "order-api",
-            "order_create_fallback",
+            "order_create_failed",
             &json!({
                 "stage": "preview_order",
+                "traceId": trace_id,
                 "reason": preview_result,
-                "fallback": "local_mock_order"
+                "fallback": "disabled_when_mcp_enabled"
             }),
         )
         .await;
-        return create_local_mock_order(state, conversation_id, context, items).await;
+        return preview_result;
+    }
+    if let Some(privilege_money) = preview_privilege_money(&preview_result) {
+        create_arguments["privilegeMoney"] = privilege_money;
+    }
+    if let Some(coupon_code_list) = preview_coupon_code_list(&preview_result) {
+        create_arguments["couponCodeList"] = coupon_code_list;
     }
     let tool_name = order_mcp_tool_name(&config, "create_order", "createOrder");
     db::log_event(
@@ -5103,6 +5224,7 @@ async fn submit_order(
         "order_create_call",
         &json!({
             "tool": tool_name,
+            "traceId": trace_id,
             "device_id": device_id,
             "context": context.clone(),
             "items": items,
@@ -5116,16 +5238,17 @@ async fn submit_order(
             &state.pool,
             conversation_id,
             "order-api",
-            "order_create_fallback",
+            "order_create_failed",
             &json!({
                 "reason": result,
-                "fallback": "local_mock_order"
+                "traceId": trace_id,
+                "fallback": "disabled_when_mcp_enabled"
             }),
         )
         .await;
-        return create_local_mock_order(state, conversation_id, context, items).await;
+        return result;
     }
-    persist_order_mcp_result(state, conversation_id, context, items, result).await
+    persist_order_mcp_result(state, conversation_id, context, &items, result).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -5155,11 +5278,10 @@ async fn list_orders(
     let base_client =
         OrderMcpClient::new(config.order_mcp_url.clone(), config.order_mcp_token.clone());
     let context = resolve_order_context(&base_client, &config, &req.device_id, req.context).await;
-    let client = OrderMcpClient::new_with_context(
-        config.order_mcp_url.clone(),
-        config.order_mcp_token.clone(),
-        &context,
-    );
+    let client = match build_order_mcp_client(&config, &context).await {
+        Ok(client) => client,
+        Err(error) => return Ok(Json(error)),
+    };
     let tool_name = order_mcp_tool_name(&config, "list_orders", "listUserOrders");
     let result = client
         .call_tool(
@@ -5201,11 +5323,10 @@ async fn get_order_detail(
     let base_client =
         OrderMcpClient::new(config.order_mcp_url.clone(), config.order_mcp_token.clone());
     let context = resolve_order_context(&base_client, &config, &req.device_id, req.context).await;
-    let client = OrderMcpClient::new_with_context(
-        config.order_mcp_url.clone(),
-        config.order_mcp_token.clone(),
-        &context,
-    );
+    let client = match build_order_mcp_client(&config, &context).await {
+        Ok(client) => client,
+        Err(error) => return Ok(Json(error)),
+    };
     let tool_name = order_mcp_tool_name(&config, "get_order_detail", "getUserOrderDetail");
     let arguments = if tool_name == "queryOrderDetailInfo" {
         json!({"orderId": req.sale_order_id})
@@ -5255,6 +5376,7 @@ async fn refund_order(
             &req.sale_order_id,
             req.reason,
             req.correlation_id,
+            None,
         )
         .await,
     ))
@@ -5268,6 +5390,7 @@ async fn refund_submitted_order(
     sale_order_id: &str,
     reason: Option<String>,
     correlation_id: Option<String>,
+    requested_trace_id: Option<&str>,
 ) -> Value {
     let config = match db::get_config(&state.pool).await {
         Ok(config) => config,
@@ -5295,14 +5418,22 @@ async fn refund_submitted_order(
             Err(error) => order_error("ORDER_REFUND_FAILED", &error.message),
         };
     }
+    let trace_id = requested_trace_id
+        .map(str::to_owned)
+        .filter(|trace_id| !trace_id.trim().is_empty())
+        .unwrap_or_else(|| format!("mjy-session-{}", conversation_id));
     let base_client =
-        OrderMcpClient::new(config.order_mcp_url.clone(), config.order_mcp_token.clone());
+        OrderMcpClient::new(config.order_mcp_url.clone(), config.order_mcp_token.clone())
+            .with_trace_id(trace_id.clone());
     let context = resolve_order_context(&base_client, &config, device_id, context).await;
-    let client = OrderMcpClient::new_with_context(
-        config.order_mcp_url.clone(),
-        config.order_mcp_token.clone(),
-        &context,
-    );
+    let client = match build_order_mcp_client(&config, &context)
+        .await
+        .map(|client| client.with_trace_id(trace_id))
+    {
+        Ok(client) => client,
+        Err(error) => return error,
+    };
+    let trace_id = client.trace_id().map(ToString::to_string);
     let tool_name = order_mcp_tool_name(&config, "refund_order", "refundOrder");
     db::log_event(
         &state.pool,
@@ -5311,6 +5442,7 @@ async fn refund_submitted_order(
         "order_refund_call",
         &json!({
             "tool": tool_name,
+            "traceId": trace_id,
             "device_id": device_id,
             "context": context.clone(),
             "saleOrderId": sale_order_id,
@@ -5335,17 +5467,15 @@ async fn refund_submitted_order(
             &state.pool,
             conversation_id,
             "order-api",
-            "order_refund_fallback",
+            "order_refund_failed",
             &json!({
                 "reason": result,
-                "fallback": "local_mock_refund"
+                "traceId": trace_id,
+                "fallback": "disabled_when_mcp_enabled"
             }),
         )
         .await;
-        return match refund_local_mock_order(state, sale_order_id, reason).await {
-            Ok(value) => value,
-            Err(error) => order_error("ORDER_REFUND_FAILED", &error.message),
-        };
+        return result;
     }
     result
 }
@@ -5400,6 +5530,26 @@ fn order_context_without_mcp(config: &AppConfig, context: Value) -> Value {
     crate::config::default_order_context()
 }
 
+async fn build_order_mcp_client(
+    config: &AppConfig,
+    context: &Value,
+) -> Result<OrderMcpClient, Value> {
+    if config.mjy_open_api.is_configured() {
+        OrderMcpClient::new_with_member_auth(
+            config.order_mcp_url.clone(),
+            config.order_mcp_token.clone(),
+            &config.mjy_open_api,
+        )
+        .await
+    } else {
+        Ok(OrderMcpClient::new_with_context(
+            config.order_mcp_url.clone(),
+            config.order_mcp_token.clone(),
+            context,
+        ))
+    }
+}
+
 fn order_mcp_tool_name(config: &AppConfig, key: &str, fallback: &str) -> String {
     config
         .order_mcp_tools
@@ -5430,17 +5580,28 @@ fn build_create_order_arguments(context: &Value, items: &[ProductMatch]) -> Valu
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("pick");
-    let mut arguments = json!({
+    let arguments = json!({
         "deptId": dept_id,
         "productList": items.iter().map(product_match_to_mcp_line).collect::<Vec<_>>(),
         "longitude": longitude,
         "latitude": latitude,
         "delivery": delivery,
-        "couponCodeList": []
+        "addressId": context.get("addressId").cloned().unwrap_or(Value::Null),
+        "couponCodeList": context
+            .get("couponCodeList")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "number": context
+            .get("number")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        "deptName": context
+            .get("deptName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
     });
-    if let Some(address_id) = context.get("addressId").and_then(value_as_i64) {
-        arguments["addressId"] = json!(address_id);
-    }
     arguments
 }
 
@@ -5456,7 +5617,61 @@ fn build_preview_order_arguments(create_arguments: &Value) -> Value {
     arguments
 }
 
+fn preview_privilege_money(result: &Value) -> Option<Value> {
+    [
+        "/data/privilegeMoney",
+        "/data/order/privilegeMoney",
+        "/data/orderInfo/privilegeMoney",
+        "/privilegeMoney",
+    ]
+    .into_iter()
+    .find_map(|pointer| {
+        result
+            .pointer(pointer)
+            .filter(|value| !value.is_null())
+            .cloned()
+    })
+}
+
+fn preview_coupon_code_list(result: &Value) -> Option<Value> {
+    [
+        "/data/couponCodeList",
+        "/data/order/couponCodeList",
+        "/data/orderInfo/couponCodeList",
+        "/couponCodeList",
+    ]
+    .into_iter()
+    .find_map(|pointer| {
+        result
+            .pointer(pointer)
+            .filter(|value| value.is_array() || value.is_null())
+            .cloned()
+    })
+}
+
 fn product_match_to_mcp_line(item: &ProductMatch) -> Value {
+    if let (Some(product_id), Some(sku_code)) = (item.mcp_product_id, item.mcp_sku_code.as_deref())
+    {
+        return json!({
+            "productId": product_id,
+            "skuCode": mcp_sku_code_value(sku_code),
+            "amount": item.quantity
+        });
+    }
+    if let (Some(parent_goods_gid), Some(parent_goods_no), Some(goods_gid), Some(goods_no)) = (
+        item.parent_goods_gid,
+        item.parent_goods_no.as_deref(),
+        item.goods_gid,
+        item.goods_no.as_deref(),
+    ) {
+        return json!({
+            "parentGoodsGid": parent_goods_gid,
+            "parentGoodsNo": parent_goods_no,
+            "goodsGid": goods_gid,
+            "goodsNo": goods_no,
+            "amount": item.quantity
+        });
+    }
     let (product_id, sku_code) = match item.product_id.as_str() {
         "cola-500" => (16513, "SP11392-500ML"),
         "water-555" => (20002, "SP20002-555ML"),
@@ -5471,6 +5686,180 @@ fn product_match_to_mcp_line(item: &ProductMatch) -> Value {
         "skuCode": sku_code,
         "amount": item.quantity
     })
+}
+
+fn mcp_sku_code_value(value: &str) -> Value {
+    value
+        .parse::<i64>()
+        .map(Value::from)
+        .unwrap_or_else(|_| Value::String(value.to_string()))
+}
+
+fn mcp_value_as_string(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(ToString::to_string)
+        .or_else(|| value.as_i64().map(|number| number.to_string()))
+        .or_else(|| value.as_u64().map(|number| number.to_string()))
+}
+
+fn mcp_result_message(value: &Value) -> String {
+    value
+        .get("message")
+        .or_else(|| value.get("msg"))
+        .and_then(Value::as_str)
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or("商品 MCP 调用失败")
+        .to_string()
+}
+
+fn with_trace_id(mut value: Value, trace_id: Option<&str>) -> Value {
+    if let Some(trace_id) = trace_id {
+        if let Some(object) = value.as_object_mut() {
+            object
+                .entry("traceId")
+                .or_insert_with(|| Value::String(trace_id.to_string()));
+        }
+    }
+    value
+}
+
+fn mcp_catalog_products(result: &Value) -> Result<Vec<Product>, String> {
+    let candidates = result
+        .get("data")
+        .and_then(Value::as_array)
+        .or_else(|| result.pointer("/data/items").and_then(Value::as_array))
+        .ok_or_else(|| "商品 MCP 返回缺少商品列表".to_string())?;
+    let mut seen_ids = HashSet::new();
+    let mut products = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let id = candidate
+            .get("productId")
+            .and_then(mcp_value_as_string)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "商品结果缺少 productId".to_string())?;
+        if !seen_ids.insert(id.clone()) {
+            continue;
+        }
+        let name = candidate
+            .get("productName")
+            .or_else(|| candidate.get("name"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "商品结果缺少 productName".to_string())?
+            .to_string();
+        let price = candidate
+            .get("estimatePrice")
+            .or_else(|| candidate.get("initialPrice"))
+            .and_then(Value::as_f64)
+            .ok_or_else(|| format!("商品 {name} 缺少价格"))?;
+        let selected_attributes = candidate
+            .get("productAttrs")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|attribute| attribute.get("selected").and_then(Value::as_bool) == Some(true))
+            .filter_map(|attribute| attribute.get("attributeName").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        let spec = if selected_attributes.is_empty() {
+            "默认规格".to_string()
+        } else {
+            selected_attributes.join(" / ")
+        };
+        products.push(Product {
+            id,
+            name: name.clone(),
+            aliases: vec![name],
+            spec,
+            price,
+        });
+    }
+    Ok(products)
+}
+
+async fn enrich_mcp_product_matches(
+    client: &OrderMcpClient,
+    config: &AppConfig,
+    context: &Value,
+    conversation_id: &str,
+    items: &[ProductMatch],
+) -> Result<Vec<ProductMatch>, Value> {
+    let tool_name = order_mcp_tool_name(config, "search_product", "searchProductForMcp");
+    let dept_id = context
+        .get("deptId")
+        .and_then(value_as_i64)
+        .or_else(|| context.get("storeId").and_then(value_as_i64))
+        .unwrap_or_default();
+    let delivery = context
+        .get("delivery")
+        .and_then(Value::as_str)
+        .unwrap_or("pick");
+    let mut enriched = Vec::with_capacity(items.len());
+    for item in items {
+        let result = client
+            .call_tool(
+                &tool_name,
+                json!({
+                    "deptId": dept_id,
+                    "query": item.name,
+                    "delivery": delivery,
+                    "chatId": conversation_id
+                }),
+            )
+            .await;
+        if !mcp_tool_succeeded(&result) {
+            return Err(order_error(
+                "ORDER_PRODUCT_RESOLUTION_FAILED",
+                result
+                    .get("message")
+                    .or_else(|| result.get("msg"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("商品搜索失败"),
+            ));
+        }
+        let candidates = result
+            .get("data")
+            .and_then(Value::as_array)
+            .or_else(|| result.pointer("/data/items").and_then(Value::as_array))
+            .cloned()
+            .unwrap_or_default();
+        let Some(candidate) = candidates.first() else {
+            // Older customer MCP deployments may expose the order tools but
+            // not the product-search tool yet. Preserve the existing product
+            // mapping in that compatibility case; the subsequent preview or
+            // create call remains the source of truth for success/failure.
+            if extract_mcp_order_id(&result).is_some() {
+                enriched.push(item.clone());
+                continue;
+            }
+            return Err(order_error(
+                "ORDER_PRODUCT_NOT_FOUND",
+                &format!("未找到商品：{}", item.name),
+            ));
+        };
+        let product_id = candidate
+            .get("productId")
+            .and_then(value_as_i64)
+            .ok_or_else(|| order_error("ORDER_PRODUCT_BAD_RESPONSE", "商品结果缺少 productId"))?;
+        let sku_code = candidate
+            .get("skuCode")
+            .and_then(mcp_value_as_string)
+            .filter(|v| !v.trim().is_empty())
+            .ok_or_else(|| order_error("ORDER_PRODUCT_BAD_RESPONSE", "商品结果缺少 skuCode"))?;
+        let mut item = item.clone();
+        item.mcp_product_id = Some(product_id);
+        item.mcp_sku_code = Some(sku_code.to_string());
+        item.unit_price = candidate
+            .get("estimatePrice")
+            .or_else(|| candidate.get("initialPrice"))
+            .and_then(Value::as_f64)
+            .unwrap_or(item.unit_price);
+        enriched.push(item);
+    }
+    Ok(enriched)
 }
 
 fn value_as_i64(value: &Value) -> Option<i64> {
@@ -5494,7 +5883,7 @@ fn mcp_tool_succeeded(value: &Value) -> bool {
         return false;
     }
     if let Some(code) = value.get("code") {
-        if code.as_i64().is_some_and(|code| code != 0) {
+        if code.as_i64().is_some_and(|code| code != 0 && code != 200) {
             return false;
         }
         if code
@@ -5550,7 +5939,9 @@ async fn persist_order_mcp_result(
 fn extract_mcp_order_id(value: &Value) -> Option<String> {
     for pointer in [
         "/data/orderId",
+        "/data/id",
         "/orderId",
+        "/id",
         "/saleOrderId",
         "/data/saleOrderId",
     ] {
@@ -5638,6 +6029,13 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+
     fn unauthorized(message: &str) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
@@ -5667,11 +6065,12 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod intent_tests {
     use super::{
-        classify_iat_error, classify_tts_error, couple_live_iat_io, decode_segment_audio_packet,
-        direct_conversation_end_reply, emit_audio_relay_diagnostic,
+        build_create_order_arguments, classify_iat_error, classify_tts_error, couple_live_iat_io,
+        decode_segment_audio_packet, direct_conversation_end_reply, emit_audio_relay_diagnostic,
         emit_upstream_audio_rejection_evidence, is_explicit_order_refund_intent,
-        is_order_confirmation_intent, mock_audio_chunk, negotiate_voice_audio,
-        pcm_duration_ms_from_bytes, reap_finished_live_asr_session, resolve_voice_audio, run_turn,
+        is_order_confirmation_intent, mcp_catalog_products, mock_audio_chunk,
+        negotiate_voice_audio, pcm_duration_ms_from_bytes, preview_coupon_code_list,
+        preview_privilege_money, reap_finished_live_asr_session, resolve_voice_audio, run_turn,
         send_client_event, stop_live_asr_session, AppState, AudioUpstreamDirection, IatProvider,
         LiveAsrFrame, LiveAsrSession, LiveIatWriterState, Message, RecognizedTurn, StreamEvent,
         TurnCapacityPermit, UpstreamMessage, Value, VoiceAudioContext, VoiceWsQuery,
@@ -5711,6 +6110,75 @@ mod intent_tests {
             AudioProfile::new(AudioFormat::Pcm, AudioSampleRate::Hz16000),
             IatProvider::Standard,
         )
+    }
+
+    #[test]
+    fn mcp_catalog_sync_maps_actual_product_shape_and_selected_spec() {
+        let products = mcp_catalog_products(&serde_json::json!({
+            "code": 0,
+            "success": true,
+            "data": [{
+                "productId": 1102014374722127653_i64,
+                "productName": "拿铁",
+                "skuCode": 100228111,
+                "initialPrice": 24.0,
+                "estimatePrice": 24.0,
+                "productAttrs": [
+                    {"attributeName": "热", "selected": false},
+                    {"attributeName": "冷", "selected": true}
+                ]
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(products.len(), 1);
+        assert_eq!(products[0].id, "1102014374722127653");
+        assert_eq!(products[0].name, "拿铁");
+        assert_eq!(products[0].spec, "冷");
+        assert_eq!(products[0].price, 24.0);
+    }
+
+    #[test]
+    fn preview_privilege_money_is_carried_from_mcp_response() {
+        let result = serde_json::json!({
+            "code": 0,
+            "success": true,
+            "data": {"privilegeMoney": 0.99}
+        });
+        assert_eq!(
+            preview_privilege_money(&result),
+            Some(serde_json::json!(0.99))
+        );
+    }
+
+    #[test]
+    fn preview_coupon_codes_are_carried_from_mcp_response() {
+        let result = serde_json::json!({
+            "code": 0,
+            "success": true,
+            "data": {"couponCodeList": ["coupon-1"]}
+        });
+        assert_eq!(
+            preview_coupon_code_list(&result),
+            Some(serde_json::json!(["coupon-1"]))
+        );
+    }
+
+    #[test]
+    fn create_order_arguments_include_customer_required_empty_fields() {
+        let arguments = build_create_order_arguments(
+            &serde_json::json!({
+                "deptId": 57,
+                "longitude": 113.9419,
+                "latitude": 22.5431,
+                "delivery": "pick"
+            }),
+            &[],
+        );
+        assert_eq!(arguments.get("addressId"), Some(&Value::Null));
+        assert_eq!(arguments.get("couponCodeList"), Some(&Value::Null));
+        assert_eq!(arguments.get("number"), Some(&serde_json::json!("")));
+        assert_eq!(arguments.get("deptName"), Some(&serde_json::json!("")));
     }
 
     fn test_app_state() -> AppState {
