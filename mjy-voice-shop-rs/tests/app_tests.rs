@@ -75,6 +75,17 @@ async fn mcp_catalog_sync_replaces_legacy_mock_products_and_keeps_manual_product
     )
     .await
     .unwrap();
+    sqlx::query(
+        "INSERT INTO products(id, name, aliases, spec, price, enabled, source) VALUES(?, ?, ?, ?, ?, 1, 'mcp')",
+    )
+    .bind("stale-mcp-product")
+    .bind("已下架咖啡")
+    .bind(r#"["旧咖啡"]"#)
+    .bind("冷")
+    .bind(18.0)
+    .execute(&state.pool)
+    .await
+    .unwrap();
     let removed = db::replace_mcp_catalog_products(
         &state.pool,
         &[Product {
@@ -92,6 +103,9 @@ async fn mcp_catalog_sync_replaces_legacy_mock_products_and_keeps_manual_product
     assert_eq!(removed, 3);
     assert!(products.iter().any(|product| product.id == "mcp-latte"));
     assert!(products.iter().any(|product| product.id == "manual-snack"));
+    assert!(!products
+        .iter()
+        .any(|product| product.id == "stale-mcp-product"));
     assert!(!products.iter().any(|product| product.id == "cola-500"));
 }
 
@@ -502,6 +516,108 @@ async fn natural_affirmation_turn_submits_order_with_local_mock_fallback() {
     assert!(event_types.contains(&"order_create_call"));
     assert!(event_types.contains(&"order_persisted"));
     assert!(event_types.contains(&"order_created"));
+}
+
+#[tokio::test]
+async fn spoken_iced_americano_then_noisy_confirmation_submits_order() {
+    let state = test_state().await;
+    db::upsert_product(
+        &state.pool,
+        &Product {
+            id: "mcp-standard-americano".to_string(),
+            name: "标准美式A".to_string(),
+            aliases: vec![
+                "标准美式".to_string(),
+                "冰美式".to_string(),
+                "美式咖啡".to_string(),
+                "美式".to_string(),
+            ],
+            spec: "冰 / 不另外加糖 / 大杯".to_string(),
+            price: 0.01,
+        },
+    )
+    .await
+    .unwrap();
+    let app = router(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/conversations/new")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let conversation_id = body["conversation_id"].as_str().unwrap().to_string();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/chat/text")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "conversation_id": conversation_id,
+                        "text": "你好我想要一杯冰你好，我想要一杯冰美式。"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let draft = body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["event_type"] == "order_draft")
+        .expect("spoken iced americano should create an order draft");
+    assert_eq!(draft["payload"]["items"][0]["name"], "标准美式A");
+    assert_eq!(draft["payload"]["items"][0]["quantity"], 1);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/chat/text")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "conversation_id": conversation_id,
+                        "text": "是是的下是是的，下单吧。"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let events = body["events"].as_array().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .find(|event| event["event_type"] == "intent_analysis")
+            .unwrap()["payload"]["intent"],
+        "confirm_order"
+    );
+    let order = events
+        .iter()
+        .find(|event| event["event_type"] == "order_created")
+        .expect("noisy confirmation should submit the pending iced americano order");
+    assert_eq!(order["payload"]["items"][0]["name"], "标准美式A");
 }
 
 #[tokio::test]

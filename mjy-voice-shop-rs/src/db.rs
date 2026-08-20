@@ -244,10 +244,16 @@ async fn upsert_product_with_source(
     Ok(())
 }
 
-/// Replaces the product catalog imported from the customer MCP while removing
-/// only old mock/legacy rows. Manually maintained products stay untouched.
+/// Replaces the product catalog imported from the customer MCP and removes old
+/// mock/legacy rows. Manually maintained products stay untouched.
 pub async fn replace_mcp_catalog_products(pool: &SqlitePool, products: &[Product]) -> Result<u64> {
     let mut transaction = pool.begin().await?;
+    // A catalog sync is a snapshot replacement. Remove the previous MCP
+    // snapshot inside the same transaction so products that disappeared from
+    // the upstream menu cannot remain orderable locally.
+    sqlx::query("DELETE FROM products WHERE source = 'mcp'")
+        .execute(&mut *transaction)
+        .await?;
     for product in products {
         sqlx::query(
             "INSERT OR REPLACE INTO products(id, name, aliases, spec, price, enabled, source) VALUES(?, ?, ?, ?, ?, 1, 'mcp')",

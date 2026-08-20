@@ -5689,10 +5689,7 @@ fn product_match_to_mcp_line(item: &ProductMatch) -> Value {
 }
 
 fn mcp_sku_code_value(value: &str) -> Value {
-    value
-        .parse::<i64>()
-        .map(Value::from)
-        .unwrap_or_else(|_| Value::String(value.to_string()))
+    Value::String(value.to_string())
 }
 
 fn mcp_value_as_string(value: &Value) -> Option<String> {
@@ -5725,11 +5722,8 @@ fn with_trace_id(mut value: Value, trace_id: Option<&str>) -> Value {
 }
 
 fn mcp_catalog_products(result: &Value) -> Result<Vec<Product>, String> {
-    let candidates = result
-        .get("data")
-        .and_then(Value::as_array)
-        .or_else(|| result.pointer("/data/items").and_then(Value::as_array))
-        .ok_or_else(|| "商品 MCP 返回缺少商品列表".to_string())?;
+    let candidates =
+        mcp_product_candidates(result).ok_or_else(|| "商品 MCP 返回缺少商品列表".to_string())?;
     let mut seen_ids = HashSet::new();
     let mut products = Vec::with_capacity(candidates.len());
     for candidate in candidates {
@@ -5772,12 +5766,32 @@ fn mcp_catalog_products(result: &Value) -> Result<Vec<Product>, String> {
         products.push(Product {
             id,
             name: name.clone(),
-            aliases: vec![name],
+            aliases: mcp_product_aliases(&name),
             spec,
             price,
         });
     }
     Ok(products)
+}
+
+fn mcp_product_aliases(name: &str) -> Vec<String> {
+    let mut aliases = vec![name.to_string()];
+    if name.starts_with("标准美式") {
+        for alias in ["标准美式", "冰美式", "美式咖啡", "美式"] {
+            if !aliases.iter().any(|existing| existing == alias) {
+                aliases.push(alias.to_string());
+            }
+        }
+    }
+    aliases
+}
+
+fn mcp_product_candidates(result: &Value) -> Option<&Vec<Value>> {
+    result
+        .get("data")
+        .and_then(Value::as_array)
+        .or_else(|| result.pointer("/data/items").and_then(Value::as_array))
+        .or_else(|| result.pointer("/data/products").and_then(Value::as_array))
 }
 
 async fn enrich_mcp_product_matches(
@@ -5820,12 +5834,7 @@ async fn enrich_mcp_product_matches(
                     .unwrap_or("商品搜索失败"),
             ));
         }
-        let candidates = result
-            .get("data")
-            .and_then(Value::as_array)
-            .or_else(|| result.pointer("/data/items").and_then(Value::as_array))
-            .cloned()
-            .unwrap_or_default();
+        let candidates = mcp_product_candidates(&result).cloned().unwrap_or_default();
         let Some(candidate) = candidates.first() else {
             // Older customer MCP deployments may expose the order tools but
             // not the product-search tool yet. Preserve the existing product
@@ -6117,17 +6126,20 @@ mod intent_tests {
         let products = mcp_catalog_products(&serde_json::json!({
             "code": 0,
             "success": true,
-            "data": [{
-                "productId": 1102014374722127653_i64,
-                "productName": "拿铁",
-                "skuCode": 100228111,
-                "initialPrice": 24.0,
-                "estimatePrice": 24.0,
-                "productAttrs": [
-                    {"attributeName": "热", "selected": false},
-                    {"attributeName": "冷", "selected": true}
-                ]
-            }]
+            "data": {
+                "products": [{
+                    "productId": 1102014374722127653_i64,
+                    "productName": "拿铁",
+                    "skuCode": 100228111,
+                    "initialPrice": 24.0,
+                    "estimatePrice": 24.0,
+                    "productAttrs": [
+                        {"attributeName": "热", "selected": false},
+                        {"attributeName": "冷", "selected": true}
+                    ]
+                }],
+                "menuUrl": ""
+            }
         }))
         .unwrap();
 
@@ -6136,6 +6148,33 @@ mod intent_tests {
         assert_eq!(products[0].name, "拿铁");
         assert_eq!(products[0].spec, "冷");
         assert_eq!(products[0].price, 24.0);
+    }
+
+    #[test]
+    fn mcp_catalog_sync_adds_spoken_aliases_for_default_americano() {
+        let products = mcp_catalog_products(&serde_json::json!({
+            "code": 0,
+            "success": true,
+            "data": {
+                "products": [{
+                    "productId": 1102012574479955491_i64,
+                    "productName": "标准美式A",
+                    "skuCode": "99999505",
+                    "estimatePrice": 0.01,
+                    "productAttrs": [
+                        {"attributeName": "冰", "selected": true},
+                        {"attributeName": "不另外加糖", "selected": true},
+                        {"attributeName": "大杯", "selected": true}
+                    ]
+                }]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(products.len(), 1);
+        for alias in ["标准美式A", "标准美式", "冰美式", "美式咖啡", "美式"] {
+            assert!(products[0].aliases.iter().any(|value| value == alias));
+        }
     }
 
     #[test]
@@ -6179,6 +6218,14 @@ mod intent_tests {
         assert_eq!(arguments.get("couponCodeList"), Some(&Value::Null));
         assert_eq!(arguments.get("number"), Some(&serde_json::json!("")));
         assert_eq!(arguments.get("deptName"), Some(&serde_json::json!("")));
+    }
+
+    #[test]
+    fn numeric_mcp_sku_code_remains_a_json_string() {
+        assert_eq!(
+            super::mcp_sku_code_value("99999505"),
+            serde_json::json!("99999505")
+        );
     }
 
     fn test_app_state() -> AppState {

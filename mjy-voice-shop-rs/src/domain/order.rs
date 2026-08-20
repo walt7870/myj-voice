@@ -423,10 +423,23 @@ pub fn parse_mcp_http_body(raw: &str) -> Result<Value, String> {
     if rpc.get("error").is_some() {
         return Ok(rpc);
     }
+    if let Some(structured_content) = rpc.pointer("/result/structuredContent") {
+        return Ok(structured_content.clone());
+    }
     let text = rpc
         .pointer("/result/content/0/text")
         .and_then(Value::as_str)
         .unwrap_or("");
+    if rpc.pointer("/result/isError").and_then(Value::as_bool) == Some(true) {
+        return Ok(order_error(
+            "ORDER_MCP_TOOL_ERROR",
+            if text.trim().is_empty() {
+                "订单 MCP 工具执行失败"
+            } else {
+                text.trim()
+            },
+        ));
+    }
     if text.trim().is_empty() {
         return Err("订单 MCP 返回内容为空".to_string());
     }
@@ -460,6 +473,43 @@ mod tests {
         assert_eq!(
             parsed.pointer("/data/id").and_then(|v| v.as_i64()),
             Some(123)
+        );
+    }
+
+    #[test]
+    fn prefers_structured_content_from_current_mcp_protocol() {
+        let raw = json!({
+            "jsonrpc": "2.0",
+            "id": "structured-result",
+            "result": {
+                "content": [{"type": "text", "text": "not-json"}],
+                "structuredContent": {"code": 0, "success": true, "data": {"result": true}},
+                "isError": false
+            }
+        })
+        .to_string();
+        let parsed = parse_mcp_http_body(&raw).unwrap();
+        assert_eq!(parsed["code"], 0);
+        assert_eq!(parsed["data"]["result"], true);
+    }
+
+    #[test]
+    fn converts_plain_text_tool_errors_to_structured_order_errors() {
+        let raw = json!({
+            "jsonrpc": "2.0",
+            "id": "tool-error",
+            "result": {
+                "content": [{"type": "text", "text": "An error occurred invoking 'previewOrder'."}],
+                "isError": true
+            }
+        })
+        .to_string();
+        let parsed = parse_mcp_http_body(&raw).unwrap();
+        assert_eq!(parsed["ok"], false);
+        assert_eq!(parsed["code"], "ORDER_MCP_TOOL_ERROR");
+        assert_eq!(
+            parsed["message"],
+            "An error occurred invoking 'previewOrder'."
         );
     }
 
