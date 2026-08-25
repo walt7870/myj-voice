@@ -3372,7 +3372,7 @@ async fn analyze_turn(
     latest_user_text: &str,
     round_user_text: &str,
 ) -> Result<Vec<StreamEvent>, ApiError> {
-    let products = db::list_products(&state.pool).await?;
+    let products = list_orderable_products(state).await?;
     let matches = match_products(round_user_text, &products);
     let active_order = latest_active_conversation_order(state, conversation_id).await?;
     let should_refund_order =
@@ -3514,6 +3514,15 @@ async fn analyze_turn(
         .await;
     }
     Ok(events)
+}
+
+async fn list_orderable_products(state: &AppState) -> Result<Vec<Product>, ApiError> {
+    let config = db::get_config(&state.pool).await?;
+    if config.order_mcp_enabled {
+        Ok(db::list_mcp_products(&state.pool).await?)
+    } else {
+        Ok(db::list_products(&state.pool).await?)
+    }
 }
 
 fn is_order_confirmation_intent(text: &str) -> bool {
@@ -3786,7 +3795,7 @@ async fn order_context_prompt(
         }
     }
 
-    let products = db::list_products(&state.pool).await?;
+    let products = list_orderable_products(state).await?;
     let matches = match_products(round_user_text, &products);
     if !matches.is_empty() {
         if is_order_confirmation_intent(latest_user_text) {
@@ -5147,8 +5156,29 @@ async fn submit_order(
         .await;
         return authorize_result;
     }
-    let items = match enrich_mcp_product_matches(&client, &config, &context, conversation_id, items)
-        .await
+    let catalog_items = match hydrate_product_matches_from_catalog(state, items).await {
+        Ok(items) => items,
+        Err(error) => {
+            let error = with_trace_id(error, trace_id.as_deref());
+            db::log_event(
+                &state.pool,
+                conversation_id,
+                "order-api",
+                "order_product_resolution_failed",
+                &error,
+            )
+            .await;
+            return error;
+        }
+    };
+    let items = match enrich_mcp_product_matches(
+        &client,
+        &config,
+        &context,
+        conversation_id,
+        &catalog_items,
+    )
+    .await
     {
         Ok(items) => items,
         Err(error) => {
@@ -5165,7 +5195,24 @@ async fn submit_order(
         }
     };
     let preview_tool = order_mcp_tool_name(&config, "preview_order", "previewOrder");
-    let mut create_arguments = build_create_order_arguments(&context, &items);
+    let mut create_arguments = match build_create_order_arguments(&context, &items) {
+        Ok(arguments) => arguments,
+        Err(message) => {
+            let error = with_trace_id(
+                order_error("ORDER_PRODUCT_NOT_RESOLVED", &message),
+                trace_id.as_deref(),
+            );
+            db::log_event(
+                &state.pool,
+                conversation_id,
+                "order-api",
+                "order_product_resolution_failed",
+                &error,
+            )
+            .await;
+            return error;
+        }
+    };
     let preview_arguments = build_preview_order_arguments(&create_arguments);
     db::log_event(
         &state.pool,
@@ -5561,7 +5608,7 @@ fn order_mcp_tool_name(config: &AppConfig, key: &str, fallback: &str) -> String 
         .to_string()
 }
 
-fn build_create_order_arguments(context: &Value, items: &[ProductMatch]) -> Value {
+fn build_create_order_arguments(context: &Value, items: &[ProductMatch]) -> Result<Value, String> {
     let dept_id = context
         .get("deptId")
         .and_then(value_as_i64)
@@ -5580,9 +5627,13 @@ fn build_create_order_arguments(context: &Value, items: &[ProductMatch]) -> Valu
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("pick");
+    let product_list = items
+        .iter()
+        .map(product_match_to_mcp_line)
+        .collect::<Result<Vec<_>, _>>()?;
     let arguments = json!({
         "deptId": dept_id,
-        "productList": items.iter().map(product_match_to_mcp_line).collect::<Vec<_>>(),
+        "productList": product_list,
         "longitude": longitude,
         "latitude": latitude,
         "delivery": delivery,
@@ -5602,7 +5653,7 @@ fn build_create_order_arguments(context: &Value, items: &[ProductMatch]) -> Valu
             .unwrap_or("")
             .to_string()
     });
-    arguments
+    Ok(arguments)
 }
 
 fn build_preview_order_arguments(create_arguments: &Value) -> Value {
@@ -5649,14 +5700,14 @@ fn preview_coupon_code_list(result: &Value) -> Option<Value> {
     })
 }
 
-fn product_match_to_mcp_line(item: &ProductMatch) -> Value {
+fn product_match_to_mcp_line(item: &ProductMatch) -> Result<Value, String> {
     if let (Some(product_id), Some(sku_code)) = (item.mcp_product_id, item.mcp_sku_code.as_deref())
     {
-        return json!({
+        return Ok(json!({
             "productId": product_id,
             "skuCode": mcp_sku_code_value(sku_code),
             "amount": item.quantity
-        });
+        }));
     }
     if let (Some(parent_goods_gid), Some(parent_goods_no), Some(goods_gid), Some(goods_no)) = (
         item.parent_goods_gid,
@@ -5664,28 +5715,50 @@ fn product_match_to_mcp_line(item: &ProductMatch) -> Value {
         item.goods_gid,
         item.goods_no.as_deref(),
     ) {
-        return json!({
+        return Ok(json!({
             "parentGoodsGid": parent_goods_gid,
             "parentGoodsNo": parent_goods_no,
             "goodsGid": goods_gid,
             "goodsNo": goods_no,
             "amount": item.quantity
-        });
+        }));
     }
-    let (product_id, sku_code) = match item.product_id.as_str() {
-        "cola-500" => (16513, "SP11392-500ML"),
-        "water-555" => (20002, "SP20002-555ML"),
-        "milk-250" => (30003, "SP30003-250ML"),
-        _ if item.name.contains("可乐") => (16513, "SP11392-500ML"),
-        _ if item.name.contains("水") || item.name.contains("怡宝") => (20002, "SP20002-555ML"),
-        _ if item.name.contains("奶") => (30003, "SP30003-250ML"),
-        _ => (16513, "SP11392-500ML"),
-    };
-    json!({
-        "productId": product_id,
-        "skuCode": sku_code,
-        "amount": item.quantity
-    })
+    Err(format!(
+        "商品 {} 未包含远程 productId 和 skuCode，请先同步远程商品目录",
+        item.name
+    ))
+}
+
+async fn hydrate_product_matches_from_catalog(
+    state: &AppState,
+    items: &[ProductMatch],
+) -> Result<Vec<ProductMatch>, Value> {
+    let products = db::list_products(&state.pool).await.map_err(|error| {
+        order_error(
+            "ORDER_PRODUCT_CATALOG_UNAVAILABLE",
+            &format!("远程商品目录读取失败：{error}"),
+        )
+    })?;
+    let mut hydrated = Vec::with_capacity(items.len());
+    for item in items {
+        let mut item = item.clone();
+        if let Some(product) = products
+            .iter()
+            .find(|product| product.id == item.product_id)
+        {
+            if item.mcp_product_id.is_none() {
+                item.mcp_product_id = product.id.parse::<i64>().ok();
+            }
+            if item.mcp_sku_code.is_none() {
+                item.mcp_sku_code = product.mcp_sku_code.clone();
+            }
+            if item.mcp_sku_code.is_some() {
+                item.unit_price = product.price;
+            }
+        }
+        hydrated.push(item);
+    }
+    Ok(hydrated)
 }
 
 fn mcp_sku_code_value(value: &str) -> Value {
@@ -5748,6 +5821,11 @@ fn mcp_catalog_products(result: &Value) -> Result<Vec<Product>, String> {
             .or_else(|| candidate.get("initialPrice"))
             .and_then(Value::as_f64)
             .ok_or_else(|| format!("商品 {name} 缺少价格"))?;
+        let mcp_sku_code = candidate
+            .get("skuCode")
+            .and_then(mcp_value_as_string)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("商品 {name} 缺少 skuCode"))?;
         let selected_attributes = candidate
             .get("productAttrs")
             .and_then(Value::as_array)
@@ -5769,6 +5847,7 @@ fn mcp_catalog_products(result: &Value) -> Result<Vec<Product>, String> {
             aliases: mcp_product_aliases(&name),
             spec,
             price,
+            mcp_sku_code: Some(mcp_sku_code),
         });
     }
     Ok(products)
@@ -5813,6 +5892,13 @@ async fn enrich_mcp_product_matches(
         .unwrap_or("pick");
     let mut enriched = Vec::with_capacity(items.len());
     for item in items {
+        // The synced MCP catalog already contains the selected variant's
+        // productId + skuCode. Reuse that authoritative remote snapshot and
+        // avoid a second name-based search whose response shape may differ.
+        if item.mcp_product_id.is_some() && item.mcp_sku_code.is_some() {
+            enriched.push(item.clone());
+            continue;
+        }
         let result = client
             .call_tool(
                 &tool_name,
@@ -5849,13 +5935,9 @@ async fn enrich_mcp_product_matches(
                 &format!("未找到商品：{}", item.name),
             ));
         };
-        let product_id = candidate
-            .get("productId")
-            .and_then(value_as_i64)
+        let product_id = resolved_mcp_product_id(candidate, item)
             .ok_or_else(|| order_error("ORDER_PRODUCT_BAD_RESPONSE", "商品结果缺少 productId"))?;
-        let sku_code = candidate
-            .get("skuCode")
-            .and_then(mcp_value_as_string)
+        let sku_code = resolved_mcp_sku_code(candidate, item)
             .filter(|v| !v.trim().is_empty())
             .ok_or_else(|| order_error("ORDER_PRODUCT_BAD_RESPONSE", "商品结果缺少 skuCode"))?;
         let mut item = item.clone();
@@ -5869,6 +5951,20 @@ async fn enrich_mcp_product_matches(
         enriched.push(item);
     }
     Ok(enriched)
+}
+
+fn resolved_mcp_product_id(candidate: &Value, item: &ProductMatch) -> Option<i64> {
+    candidate
+        .get("productId")
+        .and_then(value_as_i64)
+        .or(item.mcp_product_id)
+}
+
+fn resolved_mcp_sku_code(candidate: &Value, item: &ProductMatch) -> Option<String> {
+    candidate
+        .get("skuCode")
+        .and_then(mcp_value_as_string)
+        .or_else(|| item.mcp_sku_code.clone())
 }
 
 fn value_as_i64(value: &Value) -> Option<i64> {
@@ -6077,11 +6173,12 @@ mod intent_tests {
         build_create_order_arguments, classify_iat_error, classify_tts_error, couple_live_iat_io,
         decode_segment_audio_packet, direct_conversation_end_reply, emit_audio_relay_diagnostic,
         emit_upstream_audio_rejection_evidence, is_explicit_order_refund_intent,
-        is_order_confirmation_intent, mcp_catalog_products, mock_audio_chunk,
+        is_order_confirmation_intent, match_products, mcp_catalog_products, mock_audio_chunk,
         negotiate_voice_audio, pcm_duration_ms_from_bytes, preview_coupon_code_list,
-        preview_privilege_money, reap_finished_live_asr_session, resolve_voice_audio, run_turn,
-        send_client_event, stop_live_asr_session, AppState, AudioUpstreamDirection, IatProvider,
-        LiveAsrFrame, LiveAsrSession, LiveIatWriterState, Message, RecognizedTurn, StreamEvent,
+        preview_privilege_money, reap_finished_live_asr_session, resolve_voice_audio,
+        resolved_mcp_product_id, resolved_mcp_sku_code, run_turn, send_client_event,
+        stop_live_asr_session, AppState, AudioUpstreamDirection, IatProvider, LiveAsrFrame,
+        LiveAsrSession, LiveIatWriterState, Message, ProductMatch, RecognizedTurn, StreamEvent,
         TurnCapacityPermit, UpstreamMessage, Value, VoiceAudioContext, VoiceWsQuery,
         WsTurnCoordinator,
     };
@@ -6148,6 +6245,7 @@ mod intent_tests {
         assert_eq!(products[0].name, "拿铁");
         assert_eq!(products[0].spec, "冷");
         assert_eq!(products[0].price, 24.0);
+        assert_eq!(products[0].mcp_sku_code.as_deref(), Some("100228111"));
     }
 
     #[test]
@@ -6175,6 +6273,93 @@ mod intent_tests {
         for alias in ["标准美式A", "标准美式", "冰美式", "美式咖啡", "美式"] {
             assert!(products[0].aliases.iter().any(|value| value == alias));
         }
+    }
+
+    #[test]
+    fn matched_remote_catalog_product_carries_product_id_and_sku() {
+        let products = mcp_catalog_products(&serde_json::json!({
+            "code": 0,
+            "success": true,
+            "data": {
+                "products": [{
+                    "productId": 1102012574479955491_i64,
+                    "productName": "标准美式A",
+                    "skuCode": "99999505",
+                    "estimatePrice": 0.01,
+                    "productAttrs": []
+                }]
+            }
+        }))
+        .unwrap();
+        let matches = match_products("我要一杯冰美式", &products);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].mcp_product_id, Some(1102012574479955491_i64));
+        assert_eq!(matches[0].mcp_sku_code.as_deref(), Some("99999505"));
+    }
+
+    #[test]
+    fn remote_catalog_rejects_incomplete_product_variant() {
+        let error = mcp_catalog_products(&serde_json::json!({
+            "code": 0,
+            "success": true,
+            "data": {
+                "products": [{
+                    "productId": 1102012574479955491_i64,
+                    "productName": "标准美式A",
+                    "estimatePrice": 0.01
+                }]
+            }
+        }))
+        .expect_err("an orderable remote product must have a SKU");
+        assert!(error.contains("缺少 skuCode"));
+    }
+
+    #[test]
+    fn order_arguments_reject_non_remote_product_mapping() {
+        let item = ProductMatch {
+            product_id: "legacy-cola".to_string(),
+            name: "旧商品".to_string(),
+            spec: "默认规格".to_string(),
+            quantity: 1,
+            unit_price: 1.0,
+            confidence: 1.0,
+            parent_goods_gid: None,
+            parent_goods_no: None,
+            goods_gid: None,
+            goods_no: None,
+            mcp_product_id: None,
+            mcp_sku_code: None,
+        };
+        let error = build_create_order_arguments(&serde_json::json!({}), &[item])
+            .expect_err("legacy products must not be submitted to the real MCP");
+        assert!(error.contains("远程 productId 和 skuCode"));
+    }
+
+    #[test]
+    fn live_search_can_complete_a_catalog_product_when_product_id_is_omitted() {
+        let item = ProductMatch {
+            product_id: "1102012574479955491".to_string(),
+            name: "标准美式A".to_string(),
+            spec: "冰 / 不另外加糖 / 大杯".to_string(),
+            quantity: 1,
+            unit_price: 0.01,
+            confidence: 1.0,
+            parent_goods_gid: None,
+            parent_goods_no: None,
+            goods_gid: None,
+            goods_no: None,
+            mcp_product_id: Some(1102012574479955491),
+            mcp_sku_code: None,
+        };
+        let candidate = serde_json::json!({"skuCode": "99999505", "estimatePrice": 0.01});
+        assert_eq!(
+            resolved_mcp_product_id(&candidate, &item),
+            item.mcp_product_id
+        );
+        assert_eq!(
+            resolved_mcp_sku_code(&candidate, &item).as_deref(),
+            Some("99999505")
+        );
     }
 
     #[test]
@@ -6213,7 +6398,8 @@ mod intent_tests {
                 "delivery": "pick"
             }),
             &[],
-        );
+        )
+        .unwrap();
         assert_eq!(arguments.get("addressId"), Some(&Value::Null));
         assert_eq!(arguments.get("couponCodeList"), Some(&Value::Null));
         assert_eq!(arguments.get("number"), Some(&serde_json::json!("")));

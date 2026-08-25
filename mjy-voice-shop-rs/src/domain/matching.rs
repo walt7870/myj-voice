@@ -7,6 +7,11 @@ pub struct Product {
     pub aliases: Vec<String>,
     pub spec: String,
     pub price: f64,
+    /// SKU returned by the customer MCP catalog for this selected variant.
+    /// Keeping it with the catalog entry avoids a second, shape-sensitive
+    /// product lookup during order submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_sku_code: Option<String>,
 }
 
 impl Product {
@@ -23,6 +28,7 @@ impl Product {
             aliases: aliases.into_iter().map(ToString::to_string).collect(),
             spec: spec.into(),
             price,
+            mcp_sku_code: None,
         }
     }
 }
@@ -77,8 +83,8 @@ pub fn match_products(text: &str, products: &[Product]) -> Vec<ProductMatch> {
             parent_goods_no: None,
             goods_gid: None,
             goods_no: None,
-            mcp_product_id: None,
-            mcp_sku_code: None,
+            mcp_product_id: product.id.parse::<i64>().ok(),
+            mcp_sku_code: product.mcp_sku_code.clone(),
         });
     }
     matches

@@ -71,6 +71,7 @@ async fn mcp_catalog_sync_replaces_legacy_mock_products_and_keeps_manual_product
             aliases: vec!["手工商品".to_string()],
             spec: "件".to_string(),
             price: 9.9,
+            mcp_sku_code: None,
         },
     )
     .await
@@ -94,6 +95,7 @@ async fn mcp_catalog_sync_replaces_legacy_mock_products_and_keeps_manual_product
             aliases: vec!["拿铁".to_string()],
             spec: "冷".to_string(),
             price: 24.0,
+            mcp_sku_code: Some("latte-cold".to_string()),
         }],
     )
     .await
@@ -101,7 +103,11 @@ async fn mcp_catalog_sync_replaces_legacy_mock_products_and_keeps_manual_product
 
     let products = db::list_products(&state.pool).await.unwrap();
     assert_eq!(removed, 3);
-    assert!(products.iter().any(|product| product.id == "mcp-latte"));
+    let synced = products
+        .iter()
+        .find(|product| product.id == "mcp-latte")
+        .expect("synced MCP product should remain available");
+    assert_eq!(synced.mcp_sku_code.as_deref(), Some("latte-cold"));
     assert!(products.iter().any(|product| product.id == "manual-snack"));
     assert!(!products
         .iter()
@@ -534,6 +540,7 @@ async fn spoken_iced_americano_then_noisy_confirmation_submits_order() {
             ],
             spec: "冰 / 不另外加糖 / 大杯".to_string(),
             price: 0.01,
+            mcp_sku_code: Some("99999505".to_string()),
         },
     )
     .await
@@ -2817,6 +2824,11 @@ async fn spawn_device_button_interrupt_delayed_mcp(
                             "ok": true,
                             "code": 0,
                             "data": {
+                                "products": [{
+                                    "productId": 16513,
+                                    "skuCode": "SP11392-500ML",
+                                    "estimatePrice": 3.5
+                                }],
                                 "saleOrderId": "device-button-interrupt-order",
                                 "orderId": "device-button-interrupt-order",
                                 "orderNo": "DEVICE-BUTTON-INTERRUPT-ORDER"
@@ -2837,6 +2849,29 @@ async fn spawn_device_button_interrupt_delayed_mcp(
 async fn device_button_interrupt_stops_reply_keeps_order_analysis_fifo_and_allows_next_turn() {
     let state = test_state().await;
     let pool = state.pool.clone();
+    db::replace_mcp_catalog_products(
+        &pool,
+        &[
+            Product {
+                id: "16513".to_string(),
+                name: "可口可乐".to_string(),
+                aliases: vec!["可乐".to_string()],
+                spec: "500ml".to_string(),
+                price: 3.5,
+                mcp_sku_code: Some("SP11392-500ML".to_string()),
+            },
+            Product {
+                id: "20002".to_string(),
+                name: "怡宝矿泉水".to_string(),
+                aliases: vec!["水".to_string()],
+                spec: "555ml".to_string(),
+                price: 2.5,
+                mcp_sku_code: Some("SP20002-555ML".to_string()),
+            },
+        ],
+    )
+    .await
+    .unwrap();
     let (mcp_address, mcp_server) = spawn_device_button_interrupt_delayed_mcp().await;
     let mut config = db::get_config(&pool).await.unwrap();
     config.order_mcp_enabled = true;

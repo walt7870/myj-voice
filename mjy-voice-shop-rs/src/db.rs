@@ -88,6 +88,7 @@ pub async fn init(pool: &SqlitePool) -> Result<()> {
             aliases TEXT NOT NULL,
             spec TEXT NOT NULL,
             price REAL NOT NULL,
+            mcp_sku_code TEXT NULL,
             enabled INTEGER NOT NULL DEFAULT 1,
             source TEXT NOT NULL DEFAULT 'legacy'
         );
@@ -96,6 +97,7 @@ pub async fn init(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
     ensure_product_source_column(pool).await?;
+    ensure_product_mcp_sku_column(pool).await?;
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS devices (
@@ -202,8 +204,16 @@ pub async fn save_config(pool: &SqlitePool, config: &AppConfig) -> Result<()> {
 }
 
 pub async fn list_products(pool: &SqlitePool) -> Result<Vec<Product>> {
+    list_products_where(pool, "").await
+}
+
+pub async fn list_mcp_products(pool: &SqlitePool) -> Result<Vec<Product>> {
+    list_products_where(pool, " AND source = 'mcp'").await
+}
+
+async fn list_products_where(pool: &SqlitePool, source_clause: &str) -> Result<Vec<Product>> {
     let rows = sqlx::query(
-        "SELECT id, name, aliases, spec, price FROM products WHERE enabled = 1 ORDER BY name",
+        &format!("SELECT id, name, aliases, spec, price, mcp_sku_code FROM products WHERE enabled = 1{source_clause} ORDER BY name"),
     )
     .fetch_all(pool)
     .await?;
@@ -216,6 +226,7 @@ pub async fn list_products(pool: &SqlitePool) -> Result<Vec<Product>> {
                 aliases,
                 spec: row.get("spec"),
                 price: row.get("price"),
+                mcp_sku_code: row.get("mcp_sku_code"),
             })
         })
         .collect()
@@ -231,13 +242,14 @@ async fn upsert_product_with_source(
     source: &str,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT OR REPLACE INTO products(id, name, aliases, spec, price, enabled, source) VALUES(?, ?, ?, ?, ?, 1, ?)",
+        "INSERT OR REPLACE INTO products(id, name, aliases, spec, price, mcp_sku_code, enabled, source) VALUES(?, ?, ?, ?, ?, ?, 1, ?)",
     )
     .bind(&product.id)
     .bind(&product.name)
     .bind(serde_json::to_string(&product.aliases)?)
     .bind(&product.spec)
     .bind(product.price)
+    .bind(&product.mcp_sku_code)
     .bind(source)
     .execute(pool)
     .await?;
@@ -256,13 +268,14 @@ pub async fn replace_mcp_catalog_products(pool: &SqlitePool, products: &[Product
         .await?;
     for product in products {
         sqlx::query(
-            "INSERT OR REPLACE INTO products(id, name, aliases, spec, price, enabled, source) VALUES(?, ?, ?, ?, ?, 1, 'mcp')",
+            "INSERT OR REPLACE INTO products(id, name, aliases, spec, price, mcp_sku_code, enabled, source) VALUES(?, ?, ?, ?, ?, ?, 1, 'mcp')",
         )
         .bind(&product.id)
         .bind(&product.name)
         .bind(serde_json::to_string(&product.aliases)?)
         .bind(&product.spec)
         .bind(product.price)
+        .bind(&product.mcp_sku_code)
         .execute(&mut *transaction)
         .await?;
     }
@@ -283,6 +296,21 @@ async fn ensure_product_source_column(pool: &SqlitePool) -> Result<()> {
         .any(|row| row.get::<String, _>("name") == "source");
     if !has_source {
         sqlx::query("ALTER TABLE products ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy'")
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn ensure_product_mcp_sku_column(pool: &SqlitePool) -> Result<()> {
+    let rows = sqlx::query("PRAGMA table_info(products)")
+        .fetch_all(pool)
+        .await?;
+    let has_mcp_sku_code = rows
+        .iter()
+        .any(|row| row.get::<String, _>("name") == "mcp_sku_code");
+    if !has_mcp_sku_code {
+        sqlx::query("ALTER TABLE products ADD COLUMN mcp_sku_code TEXT NULL")
             .execute(pool)
             .await?;
     }
